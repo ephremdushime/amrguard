@@ -1,0 +1,212 @@
+{
+  "info": {
+    "name": "AMRGuard Local API",
+    "description": "Local Postman collection for the AMRGuard FastAPI backend running on http://127.0.0.1:8000",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:8000" },
+    { "key": "INTEGRATION_API_KEY", "value": "" },
+    { "key": "prescription_id", "value": "1" },
+    { "key": "pharmacy_id", "value": "1" },
+    { "key": "batch_id", "value": "1" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Meta",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/meta",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "meta"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "OpenAPI Schema",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/openapi.json",
+          "host": ["{{base_url}}"],
+          "path": ["openapi.json"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create Prescription (e-Buzima)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "x-amrguard-integration-key", "value": "{{INTEGRATION_API_KEY}}", "type": "text" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"external_id\": \"EBZ-RX-POSTMAN-001\",\n  \"patient_reference\": \"PAT-POSTMAN-001\",\n  \"prescriber\": {\n    \"external_user_id\": \"EBZ-USER-001\",\n    \"name\": \"Demo Prescriber\",\n    \"facility_code\": \"FAC-KGL-001\",\n    \"facility_name\": \"Kigali General Hospital\",\n    \"district\": \"Gasabo\"\n  },\n  \"items\": [\n    {\n      \"antibiotic_code\": \"AMX500CAP\",\n      \"generic_name\": \"Amoxicillin\",\n      \"strength\": \"500 mg\",\n      \"formulation\": \"Capsule\",\n      \"route\": \"Oral\",\n      \"dose\": 500,\n      \"frequency_per_day\": 3,\n      \"duration_days\": 5,\n      \"quantity\": 15,\n      \"indication\": \"Community-acquired infection\"\n    }\n  ],\n  \"expires_at\": \"2030-12-31T12:00:00Z\"\n}\n"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/integrations/ebuzima/prescriptions",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "integrations", "ebuzima", "prescriptions"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "List Prescriptions",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/prescriptions?limit=25",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "prescriptions"],
+          "query": [
+            { "key": "limit", "value": "25" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Get Prescription by ID",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/prescriptions/{{prescription_id}}",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "prescriptions", "{{prescription_id}}"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Create Credential",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{base_url}}/api/v1/prescriptions/{{prescription_id}}/credential",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "prescriptions", "{{prescription_id}}", "credential"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Verify Credential (JSON body)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"credential\": \"123456\"\n}\n"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/verification",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "verification"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Verify OTP (query param)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/verification/otp?otp=123456",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "verification", "otp"],
+          "query": [
+            { "key": "otp", "value": "123456" }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Pharmacies",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/pharmacies",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "pharmacies"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Pharmacy Stock",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/pharmacies/{{pharmacy_id}}/stock",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "pharmacies", "{{pharmacy_id}}", "stock"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Dispense Prescription",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pharmacy_id\": 1,\n  \"batch_id\": 1,\n  \"quantity\": 15,\n  \"credential\": \"123456\",\n  \"idempotency_key\": \"idem-001-postman\",\n  \"payment_reference\": \"PMT-POSTMAN-001\"\n}\n"
+        },
+        "url": {
+          "raw": "{{base_url}}/api/v1/prescriptions/{{prescription_id}}/dispense",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "prescriptions", "{{prescription_id}}", "dispense"]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Demo Risk Scenario",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/api/v1/demo/risk-scenario",
+          "host": ["{{base_url}}"],
+          "path": ["api", "v1", "demo", "risk-scenario"]
+        }
+      },
+      "response": []
+    }
+  ]
+}

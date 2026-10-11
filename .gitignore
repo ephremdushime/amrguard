@@ -1,0 +1,41 @@
+# Environment secrets (keep only checked-in example templates)
+.env
+.env.*
+!.env.example
+!.env.production.example
+!.env.sandbox.example
+!.env.funder-demo.example
+
+# Python
+.venv/
+.venv*/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local databases and runtime output
+*.db
+*.sqlite
+*.sqlite3
+*.log
+temp_demo_check.py
+feature_verify.py
+amrguard-feature-verify.db
+
+# Frontend dependencies and generated output
+node_modules/
+frontend/dist/
+frontend/dist-*/
+frontend/.vite/
+coverage/
+npm-debug.log*
+/package-lock.json
+
+# Local editor and operating system metadata
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

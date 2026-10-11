@@ -1,0 +1,15 @@
+node_modules/
+dist/
+dist-*/
+.vite/
+coverage/
+npm-debug.log*
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.venv/
+.venv*/
+__pycache__/

@@ -1,0 +1,64 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?Set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?Set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - funder_demo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    networks: [funder_demo_internal]
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: funder_demo
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      INTEGRATION_API_KEY: ${INTEGRATION_API_KEY:?Set a unique demo integration key}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set exact funder demo HTTPS origin}
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [funder_demo_internal]
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.funder-demo
+    restart: unless-stopped
+    environment:
+      FUNDER_DEMO_USER: ${FUNDER_DEMO_USER:?Set demo access username}
+      FUNDER_DEMO_PASSWORD: ${FUNDER_DEMO_PASSWORD:?Set a unique demo access passphrase}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-8082}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [funder_demo_internal]
+
+volumes:
+  funder_demo_postgres_data:
+
+networks:
+  funder_demo_internal:
+    driver: bridge

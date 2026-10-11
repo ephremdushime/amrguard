@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: amrguard
+      POSTGRES_USER: amrguard
+      POSTGRES_PASSWORD: amrguard_dev_password
+    ports: ["5432:5432"]
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck: {test: ["CMD-SHELL","pg_isready -U amrguard -d amrguard"],interval: 5s,timeout: 5s,retries: 10}
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://amrguard:amrguard_dev_password@db:5432/amrguard
+      APP_ENV: demo
+    ports: ["8000:8000"]
+    depends_on: {db: {condition: service_healthy}}
+    volumes: ["./backend:/app"]
+  web:
+    image: node:22-alpine
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+    ports: ["5173:5173"]
+    environment: {VITE_API_URL: http://localhost:8000}
+    volumes: ["./frontend:/app"]
+    depends_on: [api]
+volumes: {postgres_data: {}}
