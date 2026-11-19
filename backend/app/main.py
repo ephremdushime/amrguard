@@ -5,6 +5,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy import inspect
 from alembic import command as alembic_command
@@ -103,7 +104,7 @@ def meta():
     return {'name':'AMRGuard','version':APP_VERSION,'api_version':API_VERSION,'integration_mode':'adapter-ready','demo_data':settings.app_env=='demo','standards':'REST/OpenAPI; FHIR-compatible mapping layer','security':'integration-key gate available; replace/extend with approved service-to-service auth'}
 
 @app.post('/api/v1/stewardship/support')
-    def stewardship_support(payload:StewardshipSupportRequest,db:Session=Depends(get_db),_auth:bool=Depends(require_funder_demo_ui_or_integration_key)):
+def stewardship_support(payload:StewardshipSupportRequest,db:Session=Depends(get_db),_auth:bool=Depends(require_funder_demo_ui_or_integration_key)):
     """Return an embeddable, non-prescriptive stewardship review for a source EMR.
 
     Local antibiotic rules must be governed and approved before they are treated as
@@ -169,32 +170,48 @@ def create_credential(prescription_id:int,db:Session=Depends(get_db)):
     rx=db.get(Prescription,prescription_id)
     if not rx: raise HTTPException(404,'Prescription not found')
     if rx.status not in {'VALIDATED','WARNING','ACTIVE','PARTIALLY_DISPENSED'}: raise HTTPException(409,f'Prescription is {rx.status}')
+    if rx.expires_at and is_expired(rx.expires_at):
+        rx.status='EXPIRED'
+        audit(db,'PRESCRIPTION_EXPIRED','Prescription',rx.id,'AMRGuard',{'stage':'CREDENTIAL_ISSUANCE'})
+        db.commit()
+        raise HTTPException(409,'Prescription has expired')
     old=db.scalar(select(PrescriptionCredential).where(PrescriptionCredential.prescription_id==rx.id))
     otp=f'{secrets.randbelow(1000000):06d}'; token=secrets.token_urlsafe(32); expiry=utcnow()+timedelta(minutes=10)
     if old:
         old.otp_hash=digest(otp); old.qr_token_hash=digest(token); old.expires_at=expiry; old.revoked=False; old.used_count=0
     else:
         db.add(PrescriptionCredential(prescription_id=rx.id,otp_hash=digest(otp),qr_token_hash=digest(token),expires_at=expiry))
-    rx.status='ACTIVE'; audit(db,'CREDENTIAL_CREATED','Prescription',rx.id,'AMRGuard'); db.commit()
+    if rx.status in {'VALIDATED','WARNING'}:
+        rx.status='ACTIVE'
+    audit(db,'CREDENTIAL_CREATED','Prescription',rx.id,'AMRGuard'); db.commit()
     return CredentialResponse(prescription_id=rx.id,prescription_code=f'AMR-RX-{rx.id:06d}',otp=otp,qr_token=token,expires_at=expiry)
 
-def verify_credential(credential,db,consume=False):
+def verify_credential(credential,db,consume=False,expected_prescription_id:int|None=None):
     cred = db.scalar(select(PrescriptionCredential).where(PrescriptionCredential.otp_hash==digest(credential))) if credential.isdigit() and len(credential)==6 else db.scalar(select(PrescriptionCredential).where(PrescriptionCredential.qr_token_hash==digest(credential)))
     if not cred or cred.revoked or is_expired(cred.expires_at): raise HTTPException(401,'Invalid or expired credential')
+    if expected_prescription_id is not None and cred.prescription_id != expected_prescription_id:
+        audit(db,'CREDENTIAL_PRESCRIPTION_MISMATCH','Prescription',expected_prescription_id,'Pharmacy',{'credential_prescription_id':cred.prescription_id})
+        db.commit()
+        raise HTTPException(401,'Credential does not match prescription')
     rx=db.get(Prescription,cred.prescription_id)
     if not rx: raise HTTPException(404,'Prescription not found')
     if rx.status in {'CANCELLED','EXPIRED','COMPLETED','BLOCKED'}: raise HTTPException(409,f'Prescription is {rx.status}')
+    if rx.expires_at and is_expired(rx.expires_at):
+        rx.status='EXPIRED'
+        audit(db,'PRESCRIPTION_EXPIRED','Prescription',rx.id,'Pharmacy',{'stage':'VERIFICATION'})
+        db.commit()
+        raise HTTPException(409,'Prescription has expired')
     if consume: cred.used_count += 1
     audit(db,'CREDENTIAL_VERIFIED','Prescription',rx.id,'Pharmacy',{'method':'OTP' if credential.isdigit() else 'QR','consumed':consume})
-    return rx
+    return rx, cred
 
 @app.post('/api/v1/verification')
 def verify(request:VerificationRequest,db:Session=Depends(get_db)):
-    rx=verify_credential(request.credential,db); db.commit(); return {'verified':True,'prescription':prescription_detail(rx,db)}
+    rx,_=verify_credential(request.credential,db); db.commit(); return {'verified':True,'prescription':prescription_detail(rx,db)}
 
 @app.post('/api/v1/verification/otp')
 def verify_otp(otp:str=Query(min_length=6,max_length=6),db:Session=Depends(get_db)):
-    rx=verify_credential(otp,db); db.commit(); return {'verified':True,'prescription_id':rx.id,'prescription_code':f'AMR-RX-{rx.id:06d}','status':rx.status}
+    rx,_=verify_credential(otp,db); db.commit(); return {'verified':True,'prescription_id':rx.id,'prescription_code':f'AMR-RX-{rx.id:06d}','status':rx.status}
 
 @app.get('/api/v1/prescriptions')
 def list_prescriptions(limit:int=Query(default=25, ge=1, le=100), status:str|None=None, db:Session=Depends(get_db)):
@@ -351,6 +368,11 @@ def activate_prescription(prescription_id:int, db:Session=Depends(get_db)):
     rx=db.get(Prescription,prescription_id)
     if not rx: raise HTTPException(404,'Prescription not found')
     if rx.status not in {'VALIDATED','WARNING'}: raise HTTPException(409,f'Prescription is {rx.status}')
+    if rx.expires_at and is_expired(rx.expires_at):
+        rx.status='EXPIRED'
+        audit(db,'PRESCRIPTION_EXPIRED','Prescription',rx.id,'AMRGuard',{'stage':'ACTIVATION'})
+        db.commit()
+        raise HTTPException(409,'Prescription has expired')
     rx.status='ACTIVE'; audit(db,'PRESCRIPTION_ACTIVATED','Prescription',rx.id,'AMRGuard'); db.commit()
     return prescription_detail(rx,db)
 
@@ -372,26 +394,35 @@ def pharmacy_stock(pharmacy_id:int,db:Session=Depends(get_db)):
     if not db.get(Pharmacy,pharmacy_id): raise HTTPException(404,'Pharmacy not found')
     return [{'id':b.id,'antibiotic_id':b.antibiotic_id,'batch_number':b.batch_number,'expiry_date':b.expiry_date,'quantity_available':b.quantity_available} for b in db.scalars(select(StockBatch).where(StockBatch.pharmacy_id==pharmacy_id).order_by(StockBatch.expiry_date)).all()]
 
+def _build_dispense_replay_response(prior:DispensingTransaction, prescription_id:int, request:DispenseRequest, db:Session):
+    replay_item_id=request.item_id
+    replay_prescription=db.get(Prescription,prescription_id)
+    if replay_item_id is None and replay_prescription and len(replay_prescription.items)==1:
+        replay_item_id=replay_prescription.items[0].id
+    if (prior.prescription_id,prior.pharmacy_id,prior.batch_id,prior.item_id,prior.quantity)!=(prescription_id,request.pharmacy_id,request.batch_id,replay_item_id,request.quantity):
+        raise HTTPException(409,'Idempotency key was already used for a different dispensing request')
+    return {'authorized':True,'replayed':True,'transaction_id':prior.transaction_id,'quantity_dispensed':prior.quantity,'remaining':None,'prescription_status':replay_prescription.status if replay_prescription else prior.status}
+
 @app.post('/api/v1/prescriptions/{prescription_id}/dispense')
 def dispense(prescription_id:int,request:DispenseRequest,db:Session=Depends(get_db)):
     if request.idempotency_key:
         prior=db.scalar(select(DispensingTransaction).where(DispensingTransaction.idempotency_key==request.idempotency_key))
         if prior:
-            replay_item_id=request.item_id
-            if replay_item_id is None:
-                replay_prescription=db.get(Prescription,prescription_id)
-                if replay_prescription and len(replay_prescription.items)==1: replay_item_id=replay_prescription.items[0].id
-            if (prior.prescription_id,prior.pharmacy_id,prior.batch_id,prior.item_id,prior.quantity)!=(prescription_id,request.pharmacy_id,request.batch_id,replay_item_id,request.quantity):
-                raise HTTPException(409,'Idempotency key was already used for a different dispensing request')
-            return {'authorized':True,'replayed':True,'transaction_id':prior.transaction_id,'quantity_dispensed':prior.quantity,'remaining':None,'prescription_status':'COMPLETED' if prior.status=='COMPLETED' else prior.status}
+            return _build_dispense_replay_response(prior, prescription_id, request, db)
     rx=db.scalar(select(Prescription).where(Prescription.id==prescription_id).with_for_update()); batch=db.scalar(select(StockBatch).where(StockBatch.id==request.batch_id).with_for_update())
     if not rx or not batch: raise HTTPException(404,'Prescription or batch not found')
-    verify_credential(request.credential,db)
+    _, cred = verify_credential(request.credential,db,expected_prescription_id=rx.id)
     pharmacy=db.get(Pharmacy,request.pharmacy_id)
     if not pharmacy or not pharmacy.active: raise HTTPException(403,'Pharmacy is not active')
     if batch.pharmacy_id!=request.pharmacy_id: raise HTTPException(403,'Batch does not belong to this pharmacy')
     if rx.status not in {'ACTIVE','PARTIALLY_DISPENSED'}: raise HTTPException(409,f'Prescription status is {rx.status}')
-    if rx.expires_at and is_expired(rx.expires_at): rx.status='EXPIRED'; db.commit(); raise HTTPException(409,'Prescription has expired')
+    if rx.expires_at and is_expired(rx.expires_at):
+        rx.status='EXPIRED'
+        audit(db,'PRESCRIPTION_EXPIRED','Prescription',rx.id,'Pharmacy',{'stage':'DISPENSE'})
+        db.commit()
+        raise HTTPException(409,'Prescription has expired')
+    if batch.expiry_date < utcnow().date():
+        raise HTTPException(409,'Stock batch has expired')
     if request.item_id is None:
         if len(rx.items)!=1: raise HTTPException(422,'item_id is required when a prescription contains multiple items')
         item=rx.items[0]
@@ -407,7 +438,22 @@ def dispense(prescription_id:int,request:DispenseRequest,db:Session=Depends(get_
     txid=f'DT-{secrets.token_hex(6).upper()}'
     tx=DispensingTransaction(transaction_id=txid,idempotency_key=request.idempotency_key,prescription_id=rx.id,item_id=item.id,pharmacy_id=request.pharmacy_id,batch_id=batch.id,quantity=request.quantity,payment_reference=request.payment_reference); db.add(tx)
     db.add(StockEvent(batch_id=batch.id,event_type='DISPENSING',quantity=-request.quantity,reference_id=txid,source_system='AMRGuard',details=json.dumps({'prescription_id':rx.id,'pharmacy_id':request.pharmacy_id})))
-    new_item_remaining=remaining-request.quantity; total_remaining=sum(prescription_item.quantity-int(dispensed_by_item[prescription_item.id]) for prescription_item in rx.items)-request.quantity; rx.status='COMPLETED' if total_remaining==0 else 'PARTIALLY_DISPENSED'; audit(db,'DISPENSED','Prescription',rx.id,'Pharmacy',{'transaction_id':txid,'batch_id':batch.id,'item_id':item.id,'quantity':request.quantity}); db.flush(); create_due_stewardship_review(rx.id,utcnow(),db); db.commit()
+    new_item_remaining=remaining-request.quantity; total_remaining=sum(prescription_item.quantity-int(dispensed_by_item[prescription_item.id]) for prescription_item in rx.items)-request.quantity; rx.status='COMPLETED' if total_remaining==0 else 'PARTIALLY_DISPENSED'
+    cred.used_count += 1
+    if rx.status == 'COMPLETED':
+        cred.revoked = True
+    audit(db,'DISPENSED','Prescription',rx.id,'Pharmacy',{'transaction_id':txid,'batch_id':batch.id,'item_id':item.id,'quantity':request.quantity,'pharmacy_id':request.pharmacy_id})
+    db.flush()
+    create_due_stewardship_review(rx.id,utcnow(),db)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if request.idempotency_key:
+            prior=db.scalar(select(DispensingTransaction).where(DispensingTransaction.idempotency_key==request.idempotency_key))
+            if prior:
+                return _build_dispense_replay_response(prior, prescription_id, request, db)
+        raise HTTPException(409,'Conflicting dispensing transaction')
     return {'authorized':True,'replayed':False,'transaction_id':txid,'item_id':item.id,'quantity_dispensed':request.quantity,'remaining':new_item_remaining,'prescription_remaining':total_remaining,'prescription_status':rx.status}
 
 @app.get('/api/v1/traceability/batches/{batch_id}')
