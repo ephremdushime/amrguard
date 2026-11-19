@@ -14,13 +14,13 @@ AMRGuard receives prescribing orders from e-Buzima and handles validation, pharm
 
 ### Run locally
 
-Backend:
+Backend (standardized on **Python 3.13**, matching `backend/.python-version` and `backend/Dockerfile`):
 
 ```bash
 cd backend
-python -m venv .venv
+py -3.13 -m venv .venv   # or python3.13 -m venv .venv
 # activate the environment
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
@@ -30,38 +30,38 @@ For an existing database already tracked by Alembic, apply pending migrations fr
 alembic upgrade head
 ```
 
-The stewardship review queue requires the new `0005_stewardship_reviews` migration. Back up existing databases before upgrading. Unversioned legacy demo databases are not modified automatically; migrate a copy or configure a fresh local database first.
+P0 security controls require migration `0006_p0_security_rbac_audit` (organizations, tenancy links, pharmacy networks, users, roles, explicit-scope RBAC, user sessions, scoped service clients, dispensing attribution, and append-only audit triggers on PostgreSQL). Back up existing databases before upgrading. Unversioned legacy demo databases are not modified automatically; migrate a copy or configure a fresh local database first.
 
 Frontend:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev
 ```
 
-API docs: `http://localhost:8000/docs`
+API docs (disabled by default in `production`): `http://localhost:8000/docs`
 
 ### Environment
 
-Copy `.env.example` to `.env`. For production, configure PostgreSQL, a strong integration secret, restricted CORS origins, HTTPS and the approved authentication mechanism.
+Copy `.env.example` to `.env`. For production, configure PostgreSQL, distinct generated secrets for `POSTGRES_PASSWORD`, `INTEGRATION_API_KEY`, and `CREDENTIAL_HMAC_SECRET`, restricted HTTPS `ALLOWED_ORIGINS`, institutional OIDC settings (`AUTH_MODE=oidc`, `OIDC_ISSUER`, `OIDC_AUDIENCE`, `OIDC_JWKS_URL`), and TLS. Local password sessions are disabled by default in `production` (see [docs/security/ADR-001-IDENTITY-AND-AUTHZ.md](docs/security/ADR-001-IDENTITY-AND-AUTHZ.md)).
 
 ### Production deployment
 
-The default `docker-compose.yml` is for local development only. `docker-compose.prod.yml` is a restricted single-host deployment baseline, not a complete production identity or regulatory solution. It binds the web service to loopback by default. Put it behind the institution's TLS and identity-aware gateway with authentication and role-based authorization for every user; AMRGuard does not yet implement user sessions or pharmacy/prescriber roles. Create a private `.env` file from `.env.production.example`, set unique values, then run:
+The default `docker-compose.yml` is for local development only. `docker-compose.prod.yml` is a restricted single-host deployment baseline, not a complete production regulatory solution. It binds the web service to loopback by default and disables `/docs`, `/redoc`, and `/openapi.json` at Nginx and FastAPI. Application-level human authentication (OIDC/OAuth2 JWT + JWKS, or explicitly approved pilot sessions), RBAC, facility/pharmacy scoping, scoped service-client authentication, and append-only audit triggers are enforced in the backend. Put it behind the institution's TLS reverse proxy/WAF. Create a private `.env` file from `.env.production.example`, set unique values, then run:
 
 ```bash
 docker compose --env-file .env -f docker-compose.prod.yml config
 docker compose --env-file .env -f docker-compose.prod.yml up --build -d
 ```
 
-Generate secrets with `openssl rand -hex 32`; use a different value for the database password and integration key. Set `ALLOWED_ORIGINS` to the exact public HTTPS origin, such as `https://amrguard.example.org`. The API and database are private to the Compose network; Nginx serves the built frontend and proxies API/docs on the same origin. Migrations run before the API starts, and production does not auto-create tables or seed demo data. Back up the `postgres_data` volume and test restores before relying on it.
+Generate secrets with `openssl rand -hex 32`; use distinct values for `POSTGRES_PASSWORD`, `INTEGRATION_API_KEY`, and `CREDENTIAL_HMAC_SECRET`. Set `ALLOWED_ORIGINS` to the exact public HTTPS origin, such as `https://amrguard.example.org`. The API and database are private to the Compose network; Nginx serves the built frontend and proxies `/api/` and `/health/ready` on the same origin. Migrations run before the API starts, and production does not auto-create tables or seed demo data. Back up the `postgres_data` volume and test restores before relying on it.
 
-This is not yet a certified production health system. Before operational use, complete identity and role authorization at the gateway, managed secrets/key rotation, TLS/network controls, centralized audit/metrics, tested backup and restore, approved clinical formulary/rules, e-Buzima and RMS contract certification, pharmacy onboarding, SMS provider delivery callbacks, consent governance, and privacy/security review. Do not expose this service publicly until those controls have been approved.
+This is not yet a certified production health system. Before operational use, complete institutional OIDC provisioning, managed secrets/key rotation, TLS/network controls, centralized audit/metrics, tested backup and restore, approved clinical formulary/rules, e-Buzima and RMS contract certification, pharmacy onboarding, SMS provider delivery callbacks, consent governance, and privacy/security review. Do not expose this service publicly until those controls have been approved.
 
 ### Partner sandbox
 
-For a separate, restricted integration environment using synthetic or explicitly approved partner test data, see [docs/partner-sandbox.md](docs/partner-sandbox.md). It uses `docker-compose.sandbox.yml` and `.env.sandbox`; keep the integration key server-side and put the web service behind the partner-approved TLS and identity gateway.
+For a separate, restricted integration environment using synthetic or explicitly approved partner test data, see [docs/partner-sandbox.md](docs/partner-sandbox.md). It uses `docker-compose.sandbox.yml` and `.env.sandbox`; keep partner service-client keys server-side and put the web service behind the partner-approved TLS reverse proxy.
 
 ### Restricted funder demo
 
@@ -69,17 +69,23 @@ For an isolated synthetic-data walkthrough for invited reviewers, see [docs/fund
 
 ### Testing
 
-Run:
+Run unit, API, authentication, authorization, tenancy, and security tests (Python 3.13):
 
 ```bash
-pytest -q
+pytest backend/tests -v
 ```
 
-The included tests cover health, external prescription idempotency, credential verification, quantity enforcement and dispensing idempotency. Clinical rule thresholds in demo seed data are explicitly illustrative and must be replaced with approved guidance before real use.
+To run the PostgreSQL 16 migration, concurrency, row-locking, stock-consistency, and raw-SQL append-only audit-trigger tests against an **isolated, disposable synthetic test database** (never an operational database):
+
+```bash
+POSTGRES_TEST_DATABASE_URL="postgresql+psycopg://amrguard_test:synthetic_pass@127.0.0.1:5432/amrguard_test" pytest backend/tests/test_postgres_integration.py -v
+```
+
+The included tests cover health, OIDC JWT/JWKS validation, Argon2id/HttpOnly/CSRF/lockout local sessions, strict human vs. service-client separation, RBAC, cross-facility/cross-pharmacy isolation, conditional cross-facility dispensing networks, credential binding/revocation, quantity enforcement, dispensing concurrency/idempotency, and append-only audit trails. Clinical rule thresholds in demo seed data are explicitly illustrative and must be replaced with approved guidance before real use.
 
 ## Integration philosophy
 
-AMRGuard exposes stable internal API contracts and isolates external dependencies in adapters. The current inbound prescription route is `POST /api/v1/integrations/ebuzima/prescriptions` and the stock movement route is `POST /api/v1/integrations/rms/stock-events`; both require the configured integration key in `x-amrguard-integration-key`. These are AMRGuard canonical contracts, not claims about external government endpoint names. When the institution supplies approved e-Buzima, RMS/eLMIS, pharmacy, identity, or SMS specifications, certified adapters must map those contracts and handle retries, signatures, delivery acknowledgements, and operational monitoring.
+AMRGuard exposes stable internal API contracts and isolates external dependencies in adapters. The current inbound prescription route is `POST /api/v1/integrations/ebuzima/prescriptions` and the stock movement route is `POST /api/v1/integrations/rms/stock-events`; both require a provisioned, scoped partner service-client credential (`<key_prefix>.<secret>`) in `x-amrguard-integration-key` with matching facility or pharmacy authorization. These are AMRGuard canonical contracts, not claims about external government endpoint names. When the institution supplies approved e-Buzima, RMS/eLMIS, pharmacy, identity, or SMS specifications, certified adapters must map those contracts and handle retries, signatures, delivery acknowledgements, and operational monitoring.
 
 
 ## v0.7.0 Pitch-final additions
