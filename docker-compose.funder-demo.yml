@@ -23,8 +23,11 @@ services:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
       INTEGRATION_API_KEY: ${INTEGRATION_API_KEY:?Set a unique demo integration key}
+      CREDENTIAL_HMAC_SECRET: ${CREDENTIAL_HMAC_SECRET:?Set a unique demo CREDENTIAL_HMAC_SECRET}
+      AUTH_MODE: ${AUTH_MODE:-hybrid_pilot}
+      CROSS_FACILITY_DISPENSING_ENABLED: ${CROSS_FACILITY_DISPENSING_ENABLED:-false}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?Set exact funder demo HTTPS origin}
-    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16'"]
     depends_on:
       db:
         condition: service_healthy
