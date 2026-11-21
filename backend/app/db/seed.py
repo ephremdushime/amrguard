@@ -60,6 +60,9 @@ def seed_roles(db: Session) -> dict[str, Role]:
     return roles_by_code
 
 
+_demo_hash_cache: dict[str, str] = {}
+
+
 def ensure_local_user(
     db: Session,
     *,
@@ -71,13 +74,15 @@ def ensure_local_user(
 ) -> User:
     user = db.scalar(select(User).where(User.username == username))
     if not user:
+        if password not in _demo_hash_cache:
+            _demo_hash_cache[password] = hash_password(password)
         user = User(
             identity_issuer=LOCAL_ISSUER,
             identity_subject=username,
             username=username,
             display_name=display_name,
             email=email,
-            password_hash=hash_password(password),
+            password_hash=_demo_hash_cache[password],
             active=active,
         )
         db.add(user)

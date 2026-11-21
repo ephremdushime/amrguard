@@ -2068,6 +2068,7 @@ def batch_trace(
 @app.get('/api/v1/integrations/ebuzima/prescriptions/{prescription_id}/fhir')
 def prescription_fhir(
     prescription_id: int,
+    bundle: bool = Query(default=True, description='Return full FHIR R4 Bundle'),
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_authenticated_principal),
 ):
@@ -2112,7 +2113,7 @@ def prescription_fhir(
         facility_id=rx.facility_id,
     )
     db.commit()
-    return prescription_to_medication_request(rx, db)
+    return prescription_to_medication_request(rx, db, prefer_bundle=bundle)
 
 
 @app.get('/api/v1/integrations/dispensing/{transaction_id}/fhir')
