@@ -215,6 +215,79 @@ class Prescriber(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
+class MedicineConcept(Base):
+    __tablename__ = 'medicine_concepts'
+    __table_args__ = (
+        UniqueConstraint('coding_system', 'code', name='uq_medicine_concepts_system_code'),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    coding_system: Mapped[str] = mapped_column(String(100))
+    code: Mapped[str] = mapped_column(String(100), index=True)
+    display_name: Mapped[str] = mapped_column(String(255))
+    aware_category: Mapped[str] = mapped_column(String(50), default='ACCESS')
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    formulations: Mapped[list['Formulation']] = relationship(back_populates='concept', cascade='all, delete-orphan')
+
+
+class Formulation(Base):
+    __tablename__ = 'formulations'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    medicine_concept_id: Mapped[int] = mapped_column(ForeignKey('medicine_concepts.id'), index=True)
+    strength_value: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    strength_unit: Mapped[str] = mapped_column(String(50))
+    dose_form: Mapped[str] = mapped_column(String(100))
+    route: Mapped[str] = mapped_column(String(50))
+    units_per_pack: Mapped[int] = mapped_column(Integer, default=1)
+    unit_of_measure: Mapped[str] = mapped_column(String(50), default='unit')
+    liquid_concentration_mg_per_ml: Mapped[Decimal | None] = mapped_column(Numeric(12, 3), nullable=True)
+    is_divisible: Mapped[bool] = mapped_column(Boolean, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    concept: Mapped[MedicineConcept] = relationship(back_populates='formulations')
+
+
+class MedicineMapping(Base):
+    __tablename__ = 'medicine_mappings'
+    __table_args__ = (
+        UniqueConstraint('source_system', 'source_code', name='uq_medicine_mappings_source_code'),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_system: Mapped[str] = mapped_column(String(100))
+    source_code: Mapped[str] = mapped_column(String(100))
+    source_description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    medicine_concept_id: Mapped[int] = mapped_column(ForeignKey('medicine_concepts.id'), index=True)
+    formulation_id: Mapped[int | None] = mapped_column(ForeignKey('formulations.id'), nullable=True)
+    approval_status: Mapped[str] = mapped_column(String(50), default='PENDING')
+    approved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    concept: Mapped[MedicineConcept] = relationship()
+    formulation: Mapped[Formulation | None] = relationship()
+
+
+class IntegrationInbox(Base):
+    __tablename__ = 'integration_inbox'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source_system: Mapped[str] = mapped_column(String(100), index=True)
+    event_type: Mapped[str] = mapped_column(String(100))
+    external_id: Mapped[str] = mapped_column(String(150), index=True)
+    payload: Mapped[str] = mapped_column(Text)
+    quarantine_reason: Mapped[str] = mapped_column(String(150))
+    unresolved_code: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    status: Mapped[str] = mapped_column(String(50), default='QUARANTINED', index=True)
+    facility_id: Mapped[int | None] = mapped_column(ForeignKey('facilities.id'), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    resolution_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
 class Antibiotic(Base):
     __tablename__ = 'antibiotics'
 
@@ -263,12 +336,19 @@ class PrescriptionItem(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     prescription_id: Mapped[int] = mapped_column(ForeignKey('prescriptions.id'), index=True)
     antibiotic_id: Mapped[int] = mapped_column(ForeignKey('antibiotics.id'))
+    formulation_id: Mapped[int | None] = mapped_column(ForeignKey('formulations.id'), nullable=True)
     dose: Mapped[Decimal] = mapped_column(Numeric(12, 3))
+    dose_unit: Mapped[str | None] = mapped_column(String(50), nullable=True)
     frequency_per_day: Mapped[Decimal] = mapped_column(Numeric(8, 2))
     duration_days: Mapped[int] = mapped_column(Integer)
     quantity: Mapped[int] = mapped_column(Integer)
     indication: Mapped[str] = mapped_column(String(300))
+    is_prn: Mapped[bool] = mapped_column(Boolean, default=False)
+    prn_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversion_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
     prescription: Mapped[Prescription] = relationship(back_populates='items')
+    formulation: Mapped['Formulation | None'] = relationship()
 
 
 class PrescriptionCredential(Base):
@@ -373,8 +453,56 @@ class DispensingTransaction(Base):
     is_cross_facility: Mapped[bool] = mapped_column(Boolean, default=False)
     quantity: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(30), default='COMPLETED')
+    reconciliation_status: Mapped[str] = mapped_column(String(50), default='PENDING_RECONCILIATION', index=True)
     payment_reference: Mapped[str | None] = mapped_column(String(150))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    dispensing_items: Mapped[list['DispensingItem']] = relationship(back_populates='transaction', cascade='all, delete-orphan')
+
+
+class DispensingItem(Base):
+    __tablename__ = 'dispensing_items'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    transaction_id: Mapped[int] = mapped_column(ForeignKey('dispensing_transactions.id'), index=True)
+    prescription_item_id: Mapped[int] = mapped_column(ForeignKey('prescription_items.id'), index=True)
+    quantity_requested: Mapped[int] = mapped_column(Integer)
+    quantity_dispensed: Mapped[int] = mapped_column(Integer)
+    fulfillment_status: Mapped[str] = mapped_column(String(50), default='FULL')
+    refusal_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    transaction: Mapped[DispensingTransaction] = relationship(back_populates='dispensing_items')
+    batch_links: Mapped[list['DispensingBatchLink']] = relationship(back_populates='dispensing_item', cascade='all, delete-orphan')
+
+
+class DispensingBatchLink(Base):
+    __tablename__ = 'dispensing_batch_links'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    dispensing_item_id: Mapped[int] = mapped_column(ForeignKey('dispensing_items.id'), index=True)
+    batch_id: Mapped[int] = mapped_column(ForeignKey('stock_batches.id'), index=True)
+    quantity: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    dispensing_item: Mapped[DispensingItem] = relationship(back_populates='batch_links')
+    batch: Mapped[StockBatch] = relationship()
+
+
+class IntegrationOutbox(Base):
+    __tablename__ = 'integration_outbox'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    destination_system: Mapped[str] = mapped_column(String(100), index=True)
+    event_type: Mapped[str] = mapped_column(String(100))
+    aggregate_type: Mapped[str] = mapped_column(String(100))
+    aggregate_id: Mapped[str] = mapped_column(String(150))
+    payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(50), default='PENDING', index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AuditEvent(Base):

@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     # Cross-facility dispensing policy (ADR-001 Decision 2: disabled by default)
     cross_facility_dispensing_enabled: bool = False
 
+    # P1 Catalogue & Quarantine policy
+    quarantine_unmapped_codes: bool | None = None
+
     # OpenAPI docs visibility (disabled by default in production)
     enable_api_docs: bool | None = None
 
@@ -55,6 +58,12 @@ class Settings(BaseSettings):
     @property
     def is_hosted_env(self) -> bool:
         return self.app_env.lower() in {'production', 'sandbox', 'funder_demo'}
+
+    @property
+    def effective_quarantine_unmapped_codes(self) -> bool:
+        if self.quarantine_unmapped_codes is not None:
+            return self.quarantine_unmapped_codes
+        return self.is_hosted_env
 
     @property
     def effective_auth_mode(self) -> str:

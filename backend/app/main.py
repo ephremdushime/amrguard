@@ -54,8 +54,15 @@ from app.models.core import (
     Antibiotic,
     AntibioticRule,
     AuditEvent,
+    DispensingBatchLink,
+    DispensingItem,
     DispensingTransaction,
     Facility,
+    Formulation,
+    IntegrationInbox,
+    IntegrationOutbox,
+    MedicineConcept,
+    MedicineMapping,
     Pharmacy,
     Prescriber,
     Prescription,
@@ -68,10 +75,13 @@ from app.models.core import (
 )
 from app.schemas.demo import DemoPrescriptionCreate
 from app.schemas.prescriptions import (
+    BatchAllocation,
     CredentialResponse,
     DispenseRequest,
+    MedicineMappingCreate,
     PrescriptionIn,
     PrescriptionResponse,
+    QuarantineResolveRequest,
     RmsStockEventRequest,
     StewardshipReminderRequest,
     StewardshipReviewRequest,
@@ -385,6 +395,36 @@ def receive_prescription(
 ):
     fac = db.scalar(select(Facility).where(Facility.code == payload.prescriber.facility_code, Facility.active.is_(True)))
     if not fac or not service_client_allows_facility(principal, SCOPE_EBUZIMA_RX_WRITE, fac.id):
+        if not fac and settings.effective_quarantine_unmapped_codes:
+            inbox_entry = IntegrationInbox(
+                source_system=principal.service_client_code or 'e-Buzima',
+                event_type='PRESCRIPTION',
+                external_id=payload.external_id,
+                payload=payload.model_dump_json(),
+                quarantine_reason=f'Unknown facility code: {payload.prescriber.facility_code}',
+                unresolved_code=payload.prescriber.facility_code,
+                status='QUARANTINED',
+            )
+            db.add(inbox_entry)
+            db.flush()
+            audit(
+                db,
+                'INTEGRATION_EVENT_QUARANTINED',
+                'IntegrationInbox',
+                inbox_entry.id,
+                principal.service_client_code or 'e-Buzima',
+                {'external_id': payload.external_id, 'reason': inbox_entry.quarantine_reason},
+                principal=principal,
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    'message': f'Unknown facility code "{payload.prescriber.facility_code}" quarantined',
+                    'quarantine_id': inbox_entry.id,
+                    'status': 'QUARANTINED',
+                },
+            )
         audit_authz_denied(
             db,
             principal,
@@ -421,6 +461,38 @@ def receive_prescription(
         db.add(pr)
         db.flush()
     elif pr.facility_id != fac.id:
+        if settings.effective_quarantine_unmapped_codes:
+            inbox_entry = IntegrationInbox(
+                source_system=principal.service_client_code or 'e-Buzima',
+                event_type='PRESCRIPTION',
+                external_id=payload.external_id,
+                payload=payload.model_dump_json(),
+                quarantine_reason=f'Prescriber {pr.external_user_id} facility mismatch',
+                unresolved_code=payload.prescriber.facility_code,
+                status='QUARANTINED',
+                facility_id=fac.id,
+            )
+            db.add(inbox_entry)
+            db.flush()
+            audit(
+                db,
+                'INTEGRATION_EVENT_QUARANTINED',
+                'IntegrationInbox',
+                inbox_entry.id,
+                principal.service_client_code or 'e-Buzima',
+                {'external_id': payload.external_id, 'reason': inbox_entry.quarantine_reason},
+                principal=principal,
+                facility_id=fac.id,
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    'message': f'Prescriber {pr.external_user_id} does not belong to requested facility',
+                    'quarantine_id': inbox_entry.id,
+                    'status': 'QUARANTINED',
+                },
+            )
         audit_authz_denied(
             db,
             principal,
@@ -446,36 +518,100 @@ def receive_prescription(
     issues = []
     for p in payload.items:
         ab = db.scalar(select(Antibiotic).where(Antibiotic.code == p.antibiotic_code))
+        formulation = db.get(Formulation, p.formulation_id) if p.formulation_id else None
+
         if not ab:
-            if settings.is_hosted_env:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f'Unknown antibiotic catalogue code "{p.antibiotic_code}" requires approved mapping before ingestion',
+            mapping = db.scalar(
+                select(MedicineMapping).where(
+                    MedicineMapping.source_code == p.antibiotic_code,
+                    MedicineMapping.approval_status == 'APPROVED',
+                    MedicineMapping.active.is_(True),
                 )
-            ab = Antibiotic(
-                code=p.antibiotic_code,
-                generic_name=p.generic_name,
-                strength=p.strength,
-                formulation=p.formulation,
-                route=p.route,
             )
-            db.add(ab)
-            db.flush()
+            if mapping:
+                if mapping.formulation_id and not formulation:
+                    formulation = db.get(Formulation, mapping.formulation_id)
+                concept = db.get(MedicineConcept, mapping.medicine_concept_id) if mapping.medicine_concept_id else None
+                if concept:
+                    ab = db.scalar(select(Antibiotic).where(Antibiotic.code == concept.code))
+
+            if not ab:
+                if settings.effective_quarantine_unmapped_codes:
+                    db.rollback()
+                    inbox_entry = IntegrationInbox(
+                        source_system=principal.service_client_code or 'e-Buzima',
+                        event_type='PRESCRIPTION',
+                        external_id=payload.external_id,
+                        payload=payload.model_dump_json(),
+                        quarantine_reason=f'Unknown antibiotic catalogue code: {p.antibiotic_code}',
+                        unresolved_code=p.antibiotic_code,
+                        status='QUARANTINED',
+                        facility_id=fac.id,
+                    )
+                    db.add(inbox_entry)
+                    db.flush()
+                    audit(
+                        db,
+                        'INTEGRATION_EVENT_QUARANTINED',
+                        'IntegrationInbox',
+                        inbox_entry.id,
+                        principal.service_client_code or 'e-Buzima',
+                        {'external_id': payload.external_id, 'reason': inbox_entry.quarantine_reason},
+                        principal=principal,
+                        facility_id=fac.id,
+                    )
+                    db.commit()
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            'message': f'Unknown antibiotic catalogue code "{p.antibiotic_code}" requires approved mapping before ingestion',
+                            'quarantine_id': inbox_entry.id,
+                            'status': 'QUARANTINED',
+                        },
+                    )
+                ab = Antibiotic(
+                    code=p.antibiotic_code,
+                    generic_name=p.generic_name,
+                    strength=p.strength,
+                    formulation=p.formulation,
+                    route=p.route,
+                )
+                db.add(ab)
+                db.flush()
+
+        if not formulation and ab:
+            concept = db.scalar(select(MedicineConcept).where(MedicineConcept.code == ab.code))
+            if concept:
+                formulation = db.scalar(
+                    select(Formulation).where(
+                        Formulation.medicine_concept_id == concept.id,
+                        Formulation.active.is_(True),
+                    )
+                )
+
         rule = db.scalar(
             select(AntibioticRule).where(AntibioticRule.antibiotic_id == ab.id, AntibioticRule.enabled.is_(True))
         )
         item = PrescriptionItem(
             prescription_id=rx.id,
             antibiotic_id=ab.id,
+            formulation_id=formulation.id if formulation else p.formulation_id,
             dose=p.dose,
+            dose_unit=p.dose_unit,
             frequency_per_day=p.frequency_per_day,
             duration_days=p.duration_days,
             quantity=p.quantity,
             indication=p.indication,
+            is_prn=p.is_prn,
+            prn_reason=p.prn_reason,
+            instructions=p.instructions,
         )
         db.add(item)
         db.flush()
-        issues += validate_item(item, rule)
+        item_issues = validate_item(item, rule, formulation=formulation)
+        if any(issue.get('code') == 'MANUAL_REVIEW_REQUIRED' for issue in item_issues):
+            item.conversion_review_required = True
+        issues += item_issues
 
     blocks = [i for i in issues if i['severity'] == 'BLOCK']
     rx.status = 'BLOCKED' if blocks else ('WARNING' if issues else 'VALIDATED')
@@ -1009,6 +1145,36 @@ def receive_rms_stock_event(
 
     pharmacy = db.scalar(select(Pharmacy).where(Pharmacy.code == request.pharmacy_code, Pharmacy.active.is_(True)))
     if not pharmacy or not service_client_allows_pharmacy(principal, SCOPE_RMS_STOCK_WRITE, pharmacy.id):
+        if not pharmacy and settings.effective_quarantine_unmapped_codes:
+            inbox_entry = IntegrationInbox(
+                source_system=request.source_system,
+                event_type='STOCK_EVENT',
+                external_id=request.source_reference,
+                payload=request.model_dump_json(),
+                quarantine_reason=f'Unknown pharmacy code: {request.pharmacy_code}',
+                unresolved_code=request.pharmacy_code,
+                status='QUARANTINED',
+            )
+            db.add(inbox_entry)
+            db.flush()
+            audit(
+                db,
+                'INTEGRATION_EVENT_QUARANTINED',
+                'IntegrationInbox',
+                inbox_entry.id,
+                request.source_system,
+                {'source_reference': request.source_reference, 'reason': inbox_entry.quarantine_reason},
+                principal=principal,
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    'message': f'Unknown pharmacy code "{request.pharmacy_code}" quarantined',
+                    'quarantine_id': inbox_entry.id,
+                    'status': 'QUARANTINED',
+                },
+            )
         audit_authz_denied(
             db,
             principal,
@@ -1050,21 +1216,62 @@ def receive_rms_stock_event(
 
     antibiotic = db.scalar(select(Antibiotic).where(Antibiotic.code == request.antibiotic_code))
     if not antibiotic:
-        if settings.is_hosted_env:
-            raise HTTPException(
-                422,
-                f'Unknown antibiotic catalogue code "{request.antibiotic_code}" requires approved mapping before stock ingestion',
+        mapping = db.scalar(
+            select(MedicineMapping).where(
+                MedicineMapping.source_code == request.antibiotic_code,
+                MedicineMapping.approval_status == 'APPROVED',
+                MedicineMapping.active.is_(True),
             )
-        antibiotic = Antibiotic(
-            code=request.antibiotic_code,
-            generic_name=request.generic_name,
-            strength=request.strength,
-            formulation=request.formulation,
-            route=request.route,
-            active=True,
         )
-        db.add(antibiotic)
-        db.flush()
+        if mapping:
+            concept = db.get(MedicineConcept, mapping.medicine_concept_id) if mapping.medicine_concept_id else None
+            if concept:
+                antibiotic = db.scalar(select(Antibiotic).where(Antibiotic.code == concept.code))
+
+        if not antibiotic:
+            if settings.effective_quarantine_unmapped_codes:
+                inbox_entry = IntegrationInbox(
+                    source_system=request.source_system,
+                    event_type='STOCK_EVENT',
+                    external_id=request.source_reference,
+                    payload=request.model_dump_json(),
+                    quarantine_reason=f'Unknown antibiotic catalogue code: {request.antibiotic_code}',
+                    unresolved_code=request.antibiotic_code,
+                    status='QUARANTINED',
+                    facility_id=pharmacy.facility_id,
+                )
+                db.add(inbox_entry)
+                db.flush()
+                audit(
+                    db,
+                    'INTEGRATION_EVENT_QUARANTINED',
+                    'IntegrationInbox',
+                    inbox_entry.id,
+                    request.source_system,
+                    {'source_reference': request.source_reference, 'reason': inbox_entry.quarantine_reason},
+                    principal=principal,
+                    facility_id=pharmacy.facility_id,
+                    pharmacy_id=pharmacy.id,
+                )
+                db.commit()
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        'message': f'Unknown antibiotic catalogue code "{request.antibiotic_code}" requires approved mapping before stock ingestion',
+                        'quarantine_id': inbox_entry.id,
+                        'status': 'QUARANTINED',
+                    },
+                )
+            antibiotic = Antibiotic(
+                code=request.antibiotic_code,
+                generic_name=request.generic_name,
+                strength=request.strength,
+                formulation=request.formulation,
+                route=request.route,
+                active=True,
+            )
+            db.add(antibiotic)
+            db.flush()
     elif (antibiotic.generic_name, antibiotic.strength, antibiotic.formulation, antibiotic.route) != (
         request.generic_name,
         request.strength,
@@ -1131,6 +1338,348 @@ def receive_rms_stock_event(
         'batch_id': batch.id,
         'quantity_available': batch.quantity_available,
     }
+
+
+@app.get('/api/v1/integrations/inbox/quarantine')
+def list_quarantined_messages(
+    source_system: str | None = None,
+    status: str = 'QUARANTINED',
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_FACILITY_ADMIN, ROLE_STEWARDSHIP_OFFICER, ROLE_PLATFORM_OPERATOR)),
+):
+    query = select(IntegrationInbox).where(IntegrationInbox.status == status)
+    if source_system:
+        query = query.where(IntegrationInbox.source_system == source_system)
+    query = query.order_by(IntegrationInbox.created_at.desc()).offset(offset).limit(limit)
+    rows = db.scalars(query).all()
+    return [
+        {
+            'id': row.id,
+            'source_system': row.source_system,
+            'event_type': row.event_type,
+            'external_id': row.external_id,
+            'quarantine_reason': row.quarantine_reason,
+            'unresolved_code': row.unresolved_code,
+            'status': row.status,
+            'facility_id': row.facility_id,
+            'created_at': row.created_at,
+            'resolved_at': row.resolved_at,
+            'resolved_by_user_id': row.resolved_by_user_id,
+            'resolution_notes': row.resolution_notes,
+        }
+        for row in rows
+    ]
+
+
+@app.post('/api/v1/integrations/inbox/quarantine/{inbox_id}/resolve')
+def resolve_quarantined_message(
+    inbox_id: int,
+    request: QuarantineResolveRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_FACILITY_ADMIN, ROLE_STEWARDSHIP_OFFICER, ROLE_PLATFORM_OPERATOR)),
+):
+    entry = db.get(IntegrationInbox, inbox_id)
+    if not entry:
+        raise HTTPException(404, 'Quarantine inbox entry not found')
+    if entry.status not in {'QUARANTINED', 'PENDING'}:
+        raise HTTPException(409, f'Inbox entry is already {entry.status}')
+
+    if request.action == 'REJECT':
+        entry.status = 'REJECTED'
+        entry.resolved_at = utcnow()
+        entry.resolved_by_user_id = principal.user_id
+        entry.resolution_notes = request.notes
+        audit(
+            db,
+            'QUARANTINE_REJECTED',
+            'IntegrationInbox',
+            entry.id,
+            entry.source_system,
+            {'notes': request.notes},
+            principal=principal,
+            facility_id=entry.facility_id,
+        )
+        db.commit()
+        return {'id': entry.id, 'status': entry.status, 'action': 'REJECT'}
+
+    elif request.action in {'APPROVE', 'REPLAY'}:
+        if entry.event_type == 'PRESCRIPTION':
+            data = json.loads(entry.payload)
+            rx_in = PrescriptionIn(**data)
+            fac = db.scalar(select(Facility).where(Facility.code == rx_in.prescriber.facility_code, Facility.active.is_(True)))
+            if not fac:
+                raise HTTPException(422, f'Facility {rx_in.prescriber.facility_code} is still unmapped or inactive')
+            pr = db.scalar(select(Prescriber).where(Prescriber.external_user_id == rx_in.prescriber.external_user_id))
+            if not pr:
+                pr = Prescriber(external_user_id=rx_in.prescriber.external_user_id, name=rx_in.prescriber.name, facility_id=fac.id)
+                db.add(pr)
+                db.flush()
+            elif pr.facility_id != fac.id:
+                raise HTTPException(422, f'Prescriber {pr.external_user_id} facility mismatch')
+
+            existing = db.scalar(select(Prescription).where(Prescription.external_id == rx_in.external_id))
+            if existing:
+                entry.status = 'PROCESSED'
+                entry.resolved_at = utcnow()
+                entry.resolved_by_user_id = principal.user_id
+                entry.resolution_notes = 'Prescription already ingested'
+                db.commit()
+                return {'id': entry.id, 'status': entry.status, 'prescription_id': existing.id}
+
+            rx = Prescription(
+                external_id=rx_in.external_id,
+                patient_reference=rx_in.patient_reference,
+                prescriber_id=pr.id,
+                facility_id=fac.id,
+                allow_external_dispensing=bool(rx_in.allow_external_dispensing),
+                expires_at=rx_in.expires_at,
+            )
+            db.add(rx)
+            db.flush()
+            issues = []
+            for p in rx_in.items:
+                ab = db.scalar(select(Antibiotic).where(Antibiotic.code == p.antibiotic_code))
+                formulation = db.get(Formulation, p.formulation_id) if p.formulation_id else None
+                if not ab:
+                    mapping = db.scalar(
+                        select(MedicineMapping).where(
+                            MedicineMapping.source_code == p.antibiotic_code,
+                            MedicineMapping.approval_status == 'APPROVED',
+                            MedicineMapping.active.is_(True),
+                        )
+                    )
+                    if mapping:
+                        if mapping.formulation_id and not formulation:
+                            formulation = db.get(Formulation, mapping.formulation_id)
+                        concept = db.get(MedicineConcept, mapping.medicine_concept_id) if mapping.medicine_concept_id else None
+                        if concept:
+                            ab = db.scalar(select(Antibiotic).where(Antibiotic.code == concept.code))
+                    if not ab:
+                        raise HTTPException(422, f'Antibiotic code {p.antibiotic_code} remains unmapped')
+
+                if not formulation and ab:
+                    concept = db.scalar(select(MedicineConcept).where(MedicineConcept.code == ab.code))
+                    if concept:
+                        formulation = db.scalar(
+                            select(Formulation).where(
+                                Formulation.medicine_concept_id == concept.id,
+                                Formulation.active.is_(True),
+                            )
+                        )
+
+                rule = db.scalar(select(AntibioticRule).where(AntibioticRule.antibiotic_id == ab.id, AntibioticRule.enabled.is_(True)))
+                item = PrescriptionItem(
+                    prescription_id=rx.id,
+                    antibiotic_id=ab.id,
+                    formulation_id=formulation.id if formulation else p.formulation_id,
+                    dose=p.dose,
+                    dose_unit=p.dose_unit,
+                    frequency_per_day=p.frequency_per_day,
+                    duration_days=p.duration_days,
+                    quantity=p.quantity,
+                    indication=p.indication,
+                    is_prn=p.is_prn,
+                    prn_reason=p.prn_reason,
+                    instructions=p.instructions,
+                )
+                db.add(item)
+                db.flush()
+                item_issues = validate_item(item, rule, formulation=formulation)
+                if any(issue.get('code') == 'MANUAL_REVIEW_REQUIRED' for issue in item_issues):
+                    item.conversion_review_required = True
+                issues += item_issues
+
+            blocks = [i for i in issues if i['severity'] == 'BLOCK']
+            rx.status = 'BLOCKED' if blocks else ('WARNING' if issues else 'VALIDATED')
+            entry.status = 'PROCESSED'
+            entry.resolved_at = utcnow()
+            entry.resolved_by_user_id = principal.user_id
+            entry.resolution_notes = request.notes or 'Replayed successfully after mapping resolution'
+            audit(
+                db,
+                'QUARANTINE_REPLAYED',
+                'IntegrationInbox',
+                entry.id,
+                entry.source_system,
+                {'prescription_id': rx.id, 'status': rx.status},
+                principal=principal,
+                facility_id=fac.id,
+            )
+            db.commit()
+            return {'id': entry.id, 'status': entry.status, 'prescription_id': rx.id}
+
+        elif entry.event_type == 'STOCK_EVENT':
+            data = json.loads(entry.payload)
+            stock_in = RmsStockEventRequest(**data)
+            pharmacy = db.scalar(select(Pharmacy).where(Pharmacy.code == stock_in.pharmacy_code, Pharmacy.active.is_(True)))
+            if not pharmacy:
+                raise HTTPException(422, f'Pharmacy {stock_in.pharmacy_code} remains unmapped or inactive')
+            ab = db.scalar(select(Antibiotic).where(Antibiotic.code == stock_in.antibiotic_code))
+            if not ab:
+                mapping = db.scalar(
+                    select(MedicineMapping).where(
+                        MedicineMapping.source_code == stock_in.antibiotic_code,
+                        MedicineMapping.approval_status == 'APPROVED',
+                        MedicineMapping.active.is_(True),
+                    )
+                )
+                if mapping:
+                    concept = db.get(MedicineConcept, mapping.medicine_concept_id) if mapping.medicine_concept_id else None
+                    if concept:
+                        ab = db.scalar(select(Antibiotic).where(Antibiotic.code == concept.code))
+                if not ab:
+                    raise HTTPException(422, f'Antibiotic code {stock_in.antibiotic_code} remains unmapped')
+
+            batch = db.scalar(
+                select(StockBatch).where(
+                    StockBatch.pharmacy_id == pharmacy.id,
+                    StockBatch.antibiotic_id == ab.id,
+                    StockBatch.batch_number == stock_in.batch_number,
+                ).with_for_update()
+            )
+            if not batch:
+                if stock_in.event_type != 'RECEIPT':
+                    raise HTTPException(404, 'A stock batch must be received before it can be adjusted')
+                batch = StockBatch(
+                    pharmacy_id=pharmacy.id,
+                    antibiotic_id=ab.id,
+                    batch_number=stock_in.batch_number,
+                    expiry_date=stock_in.expiry_date,
+                    quantity_available=0,
+                    source_reference=stock_in.source_reference,
+                )
+                db.add(batch)
+                db.flush()
+            updated_quantity = batch.quantity_available + stock_in.quantity_delta
+            if updated_quantity < 0:
+                raise HTTPException(409, 'Stock adjustment would make available quantity negative')
+            batch.quantity_available = updated_quantity
+            event = StockEvent(
+                batch_id=batch.id,
+                event_type=stock_in.event_type,
+                quantity=stock_in.quantity_delta,
+                reference_id=stock_in.source_reference,
+                source_system=stock_in.source_system,
+                details=json.dumps(data),
+            )
+            db.add(event)
+            entry.status = 'PROCESSED'
+            entry.resolved_at = utcnow()
+            entry.resolved_by_user_id = principal.user_id
+            entry.resolution_notes = request.notes or 'Replayed successfully after mapping resolution'
+            audit(
+                db,
+                'QUARANTINE_REPLAYED',
+                'IntegrationInbox',
+                entry.id,
+                entry.source_system,
+                {'batch_id': batch.id, 'quantity_available': batch.quantity_available},
+                principal=principal,
+                pharmacy_id=pharmacy.id,
+            )
+            db.commit()
+            return {'id': entry.id, 'status': entry.status, 'batch_id': batch.id}
+
+
+@app.post('/api/v1/catalogue/mappings')
+def create_or_update_mapping(
+    request: MedicineMappingCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_FACILITY_ADMIN, ROLE_STEWARDSHIP_OFFICER, ROLE_PLATFORM_OPERATOR)),
+):
+    concept = db.get(MedicineConcept, request.medicine_concept_id)
+    if not concept:
+        raise HTTPException(404, f'MedicineConcept {request.medicine_concept_id} not found')
+    if request.formulation_id:
+        form = db.get(Formulation, request.formulation_id)
+        if not form:
+            raise HTTPException(404, f'Formulation {request.formulation_id} not found')
+
+    existing = db.scalar(
+        select(MedicineMapping).where(
+            MedicineMapping.source_system == request.source_system,
+            MedicineMapping.source_code == request.source_code,
+        )
+    )
+    now = utcnow()
+    if existing:
+        existing.medicine_concept_id = request.medicine_concept_id
+        existing.formulation_id = request.formulation_id
+        existing.source_description = request.source_description
+        existing.approval_status = request.approval_status
+        if request.approval_status == 'APPROVED':
+            existing.approved_by_user_id = principal.user_id
+            existing.approved_at = now
+        mapping = existing
+    else:
+        mapping = MedicineMapping(
+            source_system=request.source_system,
+            source_code=request.source_code,
+            source_description=request.source_description,
+            medicine_concept_id=request.medicine_concept_id,
+            formulation_id=request.formulation_id,
+            approval_status=request.approval_status,
+            approved_by_user_id=principal.user_id if request.approval_status == 'APPROVED' else None,
+            approved_at=now if request.approval_status == 'APPROVED' else None,
+            active=True,
+        )
+        db.add(mapping)
+    db.flush()
+    audit(
+        db,
+        'MEDICINE_MAPPING_SAVED',
+        'MedicineMapping',
+        mapping.id,
+        'AMRGuard',
+        {
+            'source_system': mapping.source_system,
+            'source_code': mapping.source_code,
+            'concept_id': mapping.medicine_concept_id,
+            'approval_status': mapping.approval_status,
+        },
+        principal=principal,
+    )
+    db.commit()
+    return {
+        'id': mapping.id,
+        'source_system': mapping.source_system,
+        'source_code': mapping.source_code,
+        'medicine_concept_id': mapping.medicine_concept_id,
+        'formulation_id': mapping.formulation_id,
+        'approval_status': mapping.approval_status,
+    }
+
+
+@app.get('/api/v1/catalogue/mappings')
+def list_mappings(
+    source_system: str | None = None,
+    status: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_FACILITY_ADMIN, ROLE_STEWARDSHIP_OFFICER, ROLE_PHARMACIST, ROLE_PLATFORM_OPERATOR)),
+):
+    query = select(MedicineMapping).where(MedicineMapping.active.is_(True))
+    if source_system:
+        query = query.where(MedicineMapping.source_system == source_system)
+    if status:
+        query = query.where(MedicineMapping.approval_status == status.upper())
+    query = query.order_by(MedicineMapping.source_system, MedicineMapping.source_code).limit(limit)
+    rows = db.scalars(query).all()
+    return [
+        {
+            'id': row.id,
+            'source_system': row.source_system,
+            'source_code': row.source_code,
+            'source_description': row.source_description,
+            'medicine_concept_id': row.medicine_concept_id,
+            'formulation_id': row.formulation_id,
+            'approval_status': row.approval_status,
+            'created_at': row.created_at,
+        }
+        for row in rows
+    ]
 
 
 @app.post('/api/v1/prescriptions/{prescription_id}/stewardship-reminder')
@@ -1789,25 +2338,25 @@ def dispense(
         return _build_dispense_replay_response(prior, prescription_id, request, db)
 
     rx = db.scalar(select(Prescription).where(Prescription.id == prescription_id).with_for_update())
-    batch = db.scalar(select(StockBatch).where(StockBatch.id == request.batch_id).with_for_update())
-    if not rx or not batch:
-        raise HTTPException(404, 'Prescription or batch not found')
+    if not rx:
+        raise HTTPException(404, 'Prescription not found')
 
     pharmacy = db.get(Pharmacy, request.pharmacy_id)
     if not pharmacy or not pharmacy.active:
         raise HTTPException(403, 'Pharmacy is not active')
-    if batch.pharmacy_id != request.pharmacy_id:
-        audit_authz_denied(
-            db,
-            principal,
-            action='dispense_prescription',
-            entity_type='StockBatch',
-            entity_id=batch.id,
-            facility_id=rx.facility_id,
-            pharmacy_id=request.pharmacy_id,
-            reason='batch_belongs_to_different_pharmacy',
-        )
-        raise HTTPException(403, 'Batch does not belong to this pharmacy')
+
+    if request.item_id is None:
+        if len(rx.items) != 1:
+            raise HTTPException(422, 'item_id is required when a prescription contains multiple items')
+        item = rx.items[0]
+    else:
+        item = next((prescription_item for prescription_item in rx.items if prescription_item.id == request.item_id), None)
+        if not item:
+            raise HTTPException(404, 'Prescription item not found')
+
+    antibiotic = db.get(Antibiotic, item.antibiotic_id)
+    if not antibiotic or not antibiotic.active:
+        raise HTTPException(409, 'Prescribed antibiotic catalogue item is not active')
 
     _, cred = verify_credential(
         request.credential,
@@ -1835,23 +2384,6 @@ def dispense(
         )
         db.commit()
         raise HTTPException(409, 'Prescription has expired')
-    if batch.expiry_date < utcnow().date():
-        raise HTTPException(409, 'Stock batch has expired')
-
-    if request.item_id is None:
-        if len(rx.items) != 1:
-            raise HTTPException(422, 'item_id is required when a prescription contains multiple items')
-        item = rx.items[0]
-    else:
-        item = next((prescription_item for prescription_item in rx.items if prescription_item.id == request.item_id), None)
-        if not item:
-            raise HTTPException(404, 'Prescription item not found')
-    if batch.antibiotic_id != item.antibiotic_id:
-        raise HTTPException(409, 'Batch antibiotic does not match prescription')
-
-    antibiotic = db.get(Antibiotic, item.antibiotic_id)
-    if not antibiotic or not antibiotic.active:
-        raise HTTPException(409, 'Prescribed antibiotic catalogue item is not active')
 
     # Enforce Decision 2: same-facility or strictly authorized conditional cross-facility dispensing
     authz = evaluate_prescription_dispensing_authorization(principal, rx, pharmacy, antibiotic.code, db)
@@ -1869,6 +2401,36 @@ def dispense(
         )
         raise HTTPException(403, authz.reason)
 
+    allocations = request.allocations or [BatchAllocation(batch_id=request.batch_id, quantity=request.quantity)]
+    total_quantity = sum(a.quantity for a in allocations)
+    if total_quantity <= 0:
+        raise HTTPException(422, 'Total quantity to dispense must be greater than zero')
+
+    allocated_batches: list[tuple[StockBatch, int]] = []
+    for a in allocations:
+        b = db.scalar(select(StockBatch).where(StockBatch.id == a.batch_id).with_for_update())
+        if not b:
+            raise HTTPException(404, f'Stock batch {a.batch_id} not found')
+        if b.pharmacy_id != request.pharmacy_id:
+            audit_authz_denied(
+                db,
+                principal,
+                action='dispense_prescription',
+                entity_type='StockBatch',
+                entity_id=b.id,
+                facility_id=rx.facility_id,
+                pharmacy_id=request.pharmacy_id,
+                reason='batch_belongs_to_different_pharmacy',
+            )
+            raise HTTPException(403, f'Batch {b.id} does not belong to this pharmacy')
+        if b.expiry_date < utcnow().date():
+            raise HTTPException(409, f'Stock batch {b.batch_number} has expired')
+        if b.antibiotic_id != item.antibiotic_id:
+            raise HTTPException(409, f'Batch {b.batch_number} antibiotic does not match prescription')
+        if a.quantity > b.quantity_available:
+            raise HTTPException(409, f'Insufficient stock in batch {b.batch_number} (requested {a.quantity}, available {b.quantity_available})')
+        allocated_batches.append((b, a.quantity))
+
     dispensed_by_item = {
         prescription_item.id: (
             db.scalar(
@@ -1882,49 +2444,97 @@ def dispense(
         for prescription_item in rx.items
     }
     remaining = item.quantity - int(dispensed_by_item[item.id])
-    if request.quantity > remaining:
+    if total_quantity > remaining:
         raise HTTPException(409, f'Quantity exceeds authorized remaining quantity ({remaining})')
-    if request.quantity > batch.quantity_available:
-        raise HTTPException(409, 'Insufficient pharmacy stock')
 
-    batch.quantity_available -= request.quantity
     txid = f'DT-{secrets.token_hex(6).upper()}'
+    primary_batch = allocated_batches[0][0]
     tx = DispensingTransaction(
         transaction_id=txid,
         idempotency_key=request.idempotency_key,
         prescription_id=rx.id,
         item_id=item.id,
         pharmacy_id=pharmacy.id,
-        batch_id=batch.id,
+        batch_id=primary_batch.id,
         actor_user_id=principal.user_id,
         prescribing_facility_id=rx.facility_id,
         dispensing_facility_id=pharmacy.facility_id,
         is_cross_facility=authz.is_cross_facility,
-        quantity=request.quantity,
+        quantity=total_quantity,
+        reconciliation_status='PENDING_RECONCILIATION',
         payment_reference=request.payment_reference,
     )
     db.add(tx)
-    db.add(
-        StockEvent(
-            batch_id=batch.id,
-            event_type='DISPENSING',
-            quantity=-request.quantity,
-            reference_id=txid,
-            source_system='AMRGuard',
-            details=json.dumps(
-                {
-                    'prescription_id': rx.id,
-                    'pharmacy_id': pharmacy.id,
-                    'actor_user_id': principal.user_id,
-                    'is_cross_facility': authz.is_cross_facility,
-                }
-            ),
-        )
+    db.flush()
+
+    fulfillment_status = 'FULL' if (remaining - total_quantity == 0) else 'PARTIAL'
+    disp_item = DispensingItem(
+        transaction_id=tx.id,
+        prescription_item_id=item.id,
+        quantity_requested=remaining,
+        quantity_dispensed=total_quantity,
+        fulfillment_status=fulfillment_status,
     )
-    new_item_remaining = remaining - request.quantity
+    db.add(disp_item)
+    db.flush()
+
+    for b, qty in allocated_batches:
+        b.quantity_available -= qty
+        link = DispensingBatchLink(
+            dispensing_item_id=disp_item.id,
+            batch_id=b.id,
+            quantity=qty,
+        )
+        db.add(link)
+        ref_id = f'{txid}-B{b.id}' if len(allocated_batches) > 1 else txid
+        db.add(
+            StockEvent(
+                batch_id=b.id,
+                event_type='DISPENSING',
+                quantity=-qty,
+                reference_id=ref_id,
+                source_system='AMRGuard',
+                details=json.dumps(
+                    {
+                        'prescription_id': rx.id,
+                        'pharmacy_id': pharmacy.id,
+                        'actor_user_id': principal.user_id,
+                        'is_cross_facility': authz.is_cross_facility,
+                    }
+                ),
+            )
+        )
+
+    # Durable Outbox event
+    recon_payload = {
+        'event_type': 'DISPENSING_RECONCILIATION',
+        'transaction_id': txid,
+        'prescription_id': rx.id,
+        'prescription_external_id': rx.external_id,
+        'item_id': item.id,
+        'pharmacy_code': pharmacy.code,
+        'facility_id': pharmacy.facility_id,
+        'quantity_dispensed': total_quantity,
+        'allocations': [{'batch_id': b.id, 'batch_number': b.batch_number, 'quantity': qty} for b, qty in allocated_batches],
+        'actor_user_id': principal.user_id,
+        'timestamp': utcnow().isoformat(),
+    }
+    outbox_entry = IntegrationOutbox(
+        destination_system='RMS_DISPENSE_RECONCILE',
+        event_type='DISPENSING_RECONCILIATION',
+        aggregate_type='DispensingTransaction',
+        aggregate_id=txid,
+        payload=json.dumps(recon_payload),
+        status='PENDING',
+        retry_count=0,
+        next_attempt_at=utcnow(),
+    )
+    db.add(outbox_entry)
+
+    new_item_remaining = remaining - total_quantity
     total_remaining = (
         sum(prescription_item.quantity - int(dispensed_by_item[prescription_item.id]) for prescription_item in rx.items)
-        - request.quantity
+        - total_quantity
     )
     rx.status = 'COMPLETED' if total_remaining == 0 else 'PARTIALLY_DISPENSED'
     cred.used_count += 1
@@ -1941,14 +2551,15 @@ def dispense(
         'Pharmacy',
         {
             'transaction_id': txid,
-            'batch_id': batch.id,
+            'batch_id': primary_batch.id,
             'item_id': item.id,
-            'quantity': request.quantity,
+            'quantity': total_quantity,
             'pharmacy_id': pharmacy.id,
             'prescribing_facility_id': rx.facility_id,
             'dispensing_facility_id': pharmacy.facility_id,
             'is_cross_facility': authz.is_cross_facility,
             'network_id': authz.network_id,
+            'allocations': [{'batch_id': b.id, 'quantity': qty} for b, qty in allocated_batches],
         },
         principal=principal,
         facility_id=rx.facility_id,
@@ -1977,10 +2588,12 @@ def dispense(
         'dispensing_facility_id': pharmacy.facility_id,
         'is_cross_facility': authz.is_cross_facility,
         'item_id': item.id,
-        'quantity_dispensed': request.quantity,
+        'quantity_dispensed': total_quantity,
         'remaining': new_item_remaining,
         'prescription_remaining': total_remaining,
         'prescription_status': rx.status,
+        'allocations': [{'batch_id': b.id, 'quantity': qty} for b, qty in allocated_batches],
+        'outbox_id': outbox_entry.id,
     }
 
 

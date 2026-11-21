@@ -8,11 +8,11 @@
 
 ## 1. Executive Summary
 
-AMRGuard exposes **34 FastAPI application routes** plus **3 FastAPI OpenAPI/docs routes** (37 total HTTP endpoints; OpenAPI/docs disabled by default in `production` and blocked in `frontend/nginx.conf`):
+AMRGuard exposes **38 FastAPI application routes** plus **3 FastAPI OpenAPI/docs routes** (41 total HTTP endpoints; OpenAPI/docs disabled by default in `production` and blocked in `frontend/nginx.conf`):
 
 | Endpoint Protection Class | Route Count | Implemented Enforcement Status |
 |---|---:|---|
-| Authenticated human-only operational routes (`OIDC/JWT` or controlled `local_session` + CSRF) | **21** | **ENFORCED** — Default-deny authentication, explicit RBAC roles, and service-layer facility/pharmacy/network tenancy checks. |
+| Authenticated human-only operational routes (`OIDC/JWT` or controlled `local_session` + CSRF) | **25** | **ENFORCED** — Default-deny authentication, explicit RBAC roles, and service-layer facility/pharmacy/network tenancy checks. |
 | Dual-principal operational routes (strictly separated `HUMAN` roles OR scoped `SERVICE_CLIENT`) | **6** | **ENFORCED** — Combining credentials rejected (`400`); human roles and service scopes checked independently against target facility/pharmacy. |
 | Partner service-client write routes (`SERVICE_CLIENT` only via `<key_prefix>.<secret>`) | **2** | **ENFORCED** — Per-partner credentials with keyed HMAC-SHA256 digest, expiry, revocation, rotation, explicit scope, and provisioned facility/pharmacy allowlist. |
 | Authentication lifecycle routes (`/api/v1/auth/login`, `/logout`, `/sessions/revoke-all`, `/me`) | **4** | **ENFORCED** — `/login` enforces Argon2id, rate limit, lockout, HttpOnly/Secure/SameSite=Strict cookie + CSRF cookie (disabled by default in `production`); `/logout`, `/sessions/revoke-all`, `/me` require authenticated human user (CSRF enforced on state changes). |
@@ -73,6 +73,10 @@ AMRGuard exposes **34 FastAPI application routes** plus **3 FastAPI OpenAPI/docs
 | 12 | `POST` | `/api/v1/integrations/rms/stock-events` | `main.py:receive_rms_stock_event` | Ingest stock receipt/adjustment from RMS/eLMIS | `CLINICAL-WRITE` | `ENFORCED` | `SERVICE_CLIENT` | `integrations:rms:stock:write` | Provisioned `pharmacy_id` MUST be in client's scopes; unknown pharmacies rejected (`403`); unknown medicine codes rejected (`422`) in hosted envs |
 | 13 | `GET` | `/api/v1/integrations/ebuzima/prescriptions/{prescription_id}/fhir` | `main.py:prescription_fhir` | Export prescription as FHIR MedicationRequest | `PHI-REF` (Read) | `ENFORCED` (audited) | `HUMAN` or `SERVICE_CLIENT` | Human: `prescriber`, `pharmacist`, `stewardship_officer`, `facility_admin`; Service: `integrations:ebuzima:prescriptions:read` | `rx.facility_id` MUST match caller's authorized facility scope |
 | 14 | `GET` | `/api/v1/integrations/dispensing/{transaction_id}/fhir` | `main.py:dispensing_fhir` | Export dispensing transaction as FHIR MedicationDispense | `PHI-REF` (Read) | `ENFORCED` (audited) | `HUMAN` or `SERVICE_CLIENT` | Human: `pharmacist`, `stewardship_officer`, `facility_admin`; Service: `integrations:dispensing:read` | `tx.pharmacy_id` or `rx.facility_id` MUST match caller's authorized scope |
+| 15 | `GET` | `/api/v1/integrations/inbox/quarantine` | `main.py:list_quarantined_messages` | List quarantined payloads requiring admin review | `PHI-REF` (Read) | `ENFORCED` | `HUMAN` | `facility_admin`, `stewardship_officer`, `platform_operator` | Scoped to caller's administrative domain |
+| 16 | `POST` | `/api/v1/integrations/inbox/quarantine/{inbox_id}/resolve` | `main.py:resolve_quarantined_message` | Resolve quarantined integration payload (reject or replay) | `CLINICAL-WRITE`, `AUDIT/SEC` | `ENFORCED` (audited) | `HUMAN` | `facility_admin`, `stewardship_officer`, `platform_operator` | Scoped to entry's facility/administrative domain |
+| 17 | `POST` | `/api/v1/catalogue/mappings` | `main.py:create_or_update_mapping` | Create or update code mapping to canonical concept/formulation | `OPERATIONAL` | `ENFORCED` (audited) | `HUMAN` | `facility_admin`, `stewardship_officer`, `platform_operator` | System catalogue management |
+| 18 | `GET` | `/api/v1/catalogue/mappings` | `main.py:list_mappings` | List approved catalogue code mappings | `OPERATIONAL` | `ENFORCED` | `HUMAN` | `facility_admin`, `stewardship_officer`, `pharmacist`, `platform_operator` | System catalogue management |
 
 ---
 
