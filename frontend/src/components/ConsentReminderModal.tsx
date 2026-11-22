@@ -46,7 +46,7 @@ export function ConsentReminderModal({
         body: JSON.stringify({
           patient_reference: patientReference,
           phone_number: phoneNumber.trim(),
-          purpose: 'STEWARDSHIP_REMINDER',
+          purpose: 'DOSE_REMINDER',
           channel: 'SMS',
           language,
           facility_id: facilityId,
