@@ -35,6 +35,7 @@ from app.core.authz import (
     SCOPE_SMS_CALLBACK,
     SCOPE_SMS_DISPATCH,
     SCOPE_SMS_INBOUND,
+    SCOPE_OUTBOX_DISPATCH,
     SCOPE_STEWARDSHIP_SUPPORT_READ,
     audit_authz_denied,
     authorized_facility_ids_for_human,
@@ -93,6 +94,8 @@ from app.schemas.prescriptions import (
     DispenseRequest,
     InboundSmsRequest,
     MedicineMappingCreate,
+    OutboxDispatchResponse,
+    OutboxItemResponse,
     PrescriptionIn,
     PrescriptionResponse,
     QuarantineResolveRequest,
@@ -119,6 +122,13 @@ from app.services.reminders import (
     create_dose_reminder_schedule,
     dispatch_reminders_batch,
     record_delivery_receipt,
+)
+from app.adapters import (
+    EBuzimaAdapter,
+    RMSAdapter,
+    UnmappedCodeError,
+    process_integration_outbox_batch,
+    retry_dead_letter,
 )
 from app.services.security import keyed_digest
 from app.services.validation import validate_item
@@ -656,6 +666,54 @@ def receive_prescription(
     )
     db.commit()
     return rx_view(rx, issues)
+
+
+@app.post('/api/v1/integrations/ebuzima/fhir-bundle', response_model=PrescriptionResponse)
+def receive_ebuzima_fhir_bundle(
+    payload: dict,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_service_scope(SCOPE_EBUZIMA_RX_WRITE)),
+):
+    """Ingest a FHIR R4 Bundle containing MedicationRequest resources from e-Buzima."""
+    adapter = EBuzimaAdapter()
+    try:
+        rx_in, _ = adapter.parse_prescription(payload, db)
+    except UnmappedCodeError as exc:
+        if settings.effective_quarantine_unmapped_codes:
+            inbox_entry = IntegrationInbox(
+                source_system=principal.service_client_code or 'e-Buzima',
+                event_type='FHIR_BUNDLE',
+                external_id=str(payload.get('id') or 'UNKNOWN_FHIR'),
+                payload=json.dumps(payload),
+                quarantine_reason=str(exc),
+                unresolved_code=exc.code,
+                status='QUARANTINED',
+            )
+            db.add(inbox_entry)
+            db.flush()
+            audit(
+                db,
+                'INTEGRATION_EVENT_QUARANTINED',
+                'IntegrationInbox',
+                inbox_entry.id,
+                principal.service_client_code or 'e-Buzima',
+                {'external_id': inbox_entry.external_id, 'reason': exc.details or str(exc)},
+                principal=principal,
+            )
+            db.commit()
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    'message': f'Unmapped code "{exc.code}" quarantined',
+                    'quarantine_id': inbox_entry.id,
+                    'status': 'QUARANTINED',
+                },
+            )
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f'FHIR bundle parsing error: {exc}')
+
+    return receive_prescription(rx_in, db, principal)
 
 
 @app.get('/api/v1/prescriptions/{prescription_id}')
@@ -2113,6 +2171,66 @@ def receive_inbound_sms(
         raise HTTPException(status_code=422, detail=str(e))
 
 
+# P1-05: Canonical Outbox Worker Dispatch and Dead-Letter Endpoints
+@app.post('/api/v1/integrations/outbox/dispatch-tick', response_model=OutboxDispatchResponse)
+def dispatch_integration_outbox_tick(
+    batch_size: int = Query(default=20, ge=1, le=100),
+    max_retries: int = Query(default=5, ge=1, le=20),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_authenticated_principal),
+):
+    """Worker tick to lease and dispatch pending partner outbox reconciliation messages."""
+    is_authorized = False
+    if principal.actor_type in ('SERVICE_CLIENT', 'service_client') and service_client_has_scope(principal, SCOPE_OUTBOX_DISPATCH):
+        is_authorized = True
+    elif principal.actor_type in ('HUMAN', 'human') and (ROLE_PLATFORM_OPERATOR in principal.roles):
+        is_authorized = True
+
+    if not is_authorized:
+        audit_authz_denied(
+            db,
+            principal,
+            action='outbox_dispatch_tick',
+            entity_type='IntegrationOutbox',
+            entity_id='BATCH',
+            reason='outbox_dispatch_scope_or_platform_operator_required',
+        )
+        raise HTTPException(status_code=403, detail='Requires outbox dispatch service scope or platform operator role')
+
+    stats = process_integration_outbox_batch(db, batch_size=batch_size, max_retries=max_retries)
+    return OutboxDispatchResponse(**stats)
+
+
+@app.get('/api/v1/integrations/outbox/dead-letter', response_model=list[OutboxItemResponse])
+def list_outbox_dead_letters(
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PLATFORM_OPERATOR, ROLE_FACILITY_ADMIN)),
+):
+    """Retrieve dead-letter and failed partner reconciliation events for administrative inspection."""
+    stmt = (
+        select(IntegrationOutbox)
+        .where(IntegrationOutbox.status.in_(['DEAD_LETTER', 'FAILED']))
+        .order_by(IntegrationOutbox.created_at.desc())
+        .limit(limit)
+    )
+    return list(db.scalars(stmt).all())
+
+
+@app.post('/api/v1/integrations/outbox/{outbox_id}/retry', response_model=OutboxItemResponse)
+def retry_outbox_dead_letter(
+    outbox_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PLATFORM_OPERATOR)),
+):
+    """Manually reset a dead-letter partner reconciliation event back to PENDING."""
+    try:
+        retried = retry_dead_letter(db, outbox_id)
+        return retried
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 def create_due_stewardship_review(
     prescription_id: int,
     dispensed_at: datetime,
@@ -2851,6 +2969,18 @@ def dispense(
         next_attempt_at=utcnow(),
     )
     db.add(outbox_entry)
+
+    ebuzima_outbox_entry = IntegrationOutbox(
+        destination_system='EBUZIMA_DISPENSE_UPDATE',
+        event_type='DISPENSING_RECONCILIATION',
+        aggregate_type='DispensingTransaction',
+        aggregate_id=txid,
+        payload=json.dumps(recon_payload),
+        status='PENDING',
+        retry_count=0,
+        next_attempt_at=utcnow(),
+    )
+    db.add(ebuzima_outbox_entry)
 
     new_item_remaining = remaining - total_quantity
     total_remaining = (

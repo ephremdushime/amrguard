@@ -48,6 +48,7 @@ SCOPE_STEWARDSHIP_SUPPORT_READ = 'stewardship:support:read'
 SCOPE_SMS_DISPATCH = 'integrations:sms:dispatch'
 SCOPE_SMS_CALLBACK = 'integrations:sms:callback'
 SCOPE_SMS_INBOUND = 'integrations:sms:inbound'
+SCOPE_OUTBOX_DISPATCH = 'integrations:outbox:dispatch'
 
 
 @dataclass(frozen=True)

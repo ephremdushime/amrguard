@@ -144,3 +144,14 @@ AMRGuard exposes **46 FastAPI application routes** plus **3 FastAPI OpenAPI/docs
 | 44 | `POST` | `/api/v1/integrations/sms/delivery-callback` | `main.py:receive_sms_delivery_callback` | SMS delivery webhook receipt | `OPERATIONAL`, `NETWORK-EVENT` | `ENFORCED` (audited, non-adherence) | `SERVICE_CLIENT` | `integrations:sms:callback` | SMS Gateway partner service client scope |
 | 45 | `POST` | `/api/v1/integrations/sms/inbound` | `main.py:receive_inbound_sms` | Inbound SMS opt-out webhook (STOP/YEKA) | `PHI-REF`, `CONSENT` | `ENFORCED` (audited, phone hashed) | `SERVICE_CLIENT` | `integrations:sms:inbound` | SMS Gateway partner service client scope |
 
+---
+
+### 3.9 Partner Adapters & Integration Outbox Worker Routes
+
+| # | Method | Route | Handler | Purpose | Sensitive Data | Enforcement Status | Auth Requirement | Required Role(s) / Scope(s) | Facility/Pharmacy Scope |
+|---:|---|---|---|---|---|---|---|---|---|
+| 46 | `POST` | `/api/v1/integrations/ebuzima/fhir-bundle` | `main.py:receive_ebuzima_fhir_bundle` | Ingest FHIR R4 MedicationRequest Bundle | `PHI-REF`, `CLINICAL-WRITE` | `ENFORCED` (quarantine + audited) | `SERVICE_CLIENT` | `integrations:ebuzima:prescriptions:write` | Scoped strictly to provisioned partner facility permissions |
+| 47 | `POST` | `/api/v1/integrations/outbox/dispatch-tick` | `main.py:dispatch_integration_outbox_tick` | Lease & dispatch partner outbox batch | `OPERATIONAL`, `OUTBOX` | `ENFORCED` (audited, backoff retry) | `SERVICE_CLIENT` or `HUMAN` | Service: `integrations:outbox:dispatch`; Human: `platform_operator` | Background integration worker or platform operator |
+| 48 | `GET` | `/api/v1/integrations/outbox/dead-letter` | `main.py:list_outbox_dead_letters` | List dead-letter reconciliation messages | `OPERATIONAL`, `OUTBOX` (Read) | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Technical operational inspection |
+| 49 | `POST` | `/api/v1/integrations/outbox/{outbox_id}/retry` | `main.py:retry_outbox_dead_letter` | Manually reset dead-letter outbox message | `OPERATIONAL`, `OUTBOX` | `ENFORCED` (audited) | `HUMAN` | `platform_operator` | Technical operational remediation |
+

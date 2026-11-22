@@ -240,3 +240,30 @@ class InboundSmsRequest(BaseModel):
     message_body: str = Field(min_length=1, max_length=500)
     received_at: datetime | None = None
 
+
+class OutboxDispatchResponse(BaseModel):
+    processed: int
+    dispatched: int
+    retrying: int
+    dead_letter: int
+
+
+class OutboxItemResponse(BaseModel):
+    id: int
+    destination_system: str
+    event_type: str
+    aggregate_type: str
+    aggregate_id: str
+    payload: str
+    status: str
+    retry_count: int
+    next_attempt_at: datetime
+    last_attempt_at: datetime | None = None
+    error_message: str | None = None
+    created_at: datetime
+    dispatched_at: datetime | None = None
+
+    class Config:
+        from_attributes = True
+
+

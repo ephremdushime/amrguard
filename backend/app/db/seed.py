@@ -22,6 +22,7 @@ from app.core.authz import (
     SCOPE_SMS_DISPATCH,
     SCOPE_SMS_INBOUND,
     SCOPE_STEWARDSHIP_SUPPORT_READ,
+    SCOPE_OUTBOX_DISPATCH,
 )
 from app.core.config import settings
 from app.models.core import (
@@ -52,6 +53,9 @@ DEMO_RMS_API_KEY = f'{DEMO_RMS_KEY_PREFIX}.{DEMO_RMS_KEY_SECRET}'
 DEMO_SMS_GATEWAY_KEY_PREFIX = 'sms_demo_k1'
 DEMO_SMS_GATEWAY_KEY_SECRET = 'synthetic-demo-sms-secret-not-for-prod-0001'
 DEMO_SMS_GATEWAY_API_KEY = f'{DEMO_SMS_GATEWAY_KEY_PREFIX}.{DEMO_SMS_GATEWAY_KEY_SECRET}'
+DEMO_OUTBOX_WORKER_KEY_PREFIX = 'outbox_demo_k1'
+DEMO_OUTBOX_WORKER_KEY_SECRET = 'synthetic-demo-outbox-secret-not-for-prod-0001'
+DEMO_OUTBOX_WORKER_API_KEY = f'{DEMO_OUTBOX_WORKER_KEY_PREFIX}.{DEMO_OUTBOX_WORKER_KEY_SECRET}'
 
 
 def seed_roles(db: Session) -> dict[str, Role]:
@@ -372,6 +376,18 @@ def seed_demo(db: Session):
             (SCOPE_SMS_DISPATCH, None, None),
             (SCOPE_SMS_CALLBACK, None, None),
             (SCOPE_SMS_INBOUND, None, None),
+        ],
+    )
+
+    ensure_service_client(
+        db,
+        client_code='outbox-demo-worker',
+        name='Synthetic Outbox Dispatch Worker',
+        partner_type='SYSTEM_WORKER',
+        key_prefix=DEMO_OUTBOX_WORKER_KEY_PREFIX,
+        key_secret=DEMO_OUTBOX_WORKER_KEY_SECRET,
+        scopes=[
+            (SCOPE_OUTBOX_DISPATCH, None, None),
         ],
     )
 
