@@ -8,13 +8,13 @@
 
 ## 1. Executive Summary
 
-AMRGuard exposes **38 FastAPI application routes** plus **3 FastAPI OpenAPI/docs routes** (41 total HTTP endpoints; OpenAPI/docs disabled by default in `production` and blocked in `frontend/nginx.conf`):
+AMRGuard exposes **46 FastAPI application routes** plus **3 FastAPI OpenAPI/docs routes** (49 total HTTP endpoints; OpenAPI/docs disabled by default in `production` and blocked in `frontend/nginx.conf`):
 
 | Endpoint Protection Class | Route Count | Implemented Enforcement Status |
 |---|---:|---|
-| Authenticated human-only operational routes (`OIDC/JWT` or controlled `local_session` + CSRF) | **25** | **ENFORCED** — Default-deny authentication, explicit RBAC roles, and service-layer facility/pharmacy/network tenancy checks. |
+| Authenticated human-only operational routes (`OIDC/JWT` or controlled `local_session` + CSRF) | **30** | **ENFORCED** — Default-deny authentication, explicit RBAC roles, and service-layer facility/pharmacy/network tenancy checks. |
 | Dual-principal operational routes (strictly separated `HUMAN` roles OR scoped `SERVICE_CLIENT`) | **6** | **ENFORCED** — Combining credentials rejected (`400`); human roles and service scopes checked independently against target facility/pharmacy. |
-| Partner service-client write routes (`SERVICE_CLIENT` only via `<key_prefix>.<secret>`) | **2** | **ENFORCED** — Per-partner credentials with keyed HMAC-SHA256 digest, expiry, revocation, rotation, explicit scope, and provisioned facility/pharmacy allowlist. |
+| Partner / integration service-client routes (`SERVICE_CLIENT` only via `<key_prefix>.<secret>`) | **5** | **ENFORCED** — Per-partner credentials with keyed HMAC-SHA256 digest, expiry, revocation, rotation, explicit scope, and provisioned facility/pharmacy allowlist. |
 | Authentication lifecycle routes (`/api/v1/auth/login`, `/logout`, `/sessions/revoke-all`, `/me`) | **4** | **ENFORCED** — `/login` enforces Argon2id, rate limit, lockout, HttpOnly/Secure/SameSite=Strict cookie + CSRF cookie (disabled by default in `production`); `/logout`, `/sessions/revoke-all`, `/me` require authenticated human user (CSRF enforced on state changes). |
 | Public liveness / readiness probes (`/health`, `/health/ready`) | **2** | **PUBLIC (HARDENED)** — `/health` omits `environment` in `production`; `/health/ready` returns generic `503` without DB details on failure. |
 | Environment-gated demo routes (`/api/v1/demo/*`) | *(counted in human-only above)* | **ENFORCED + ENV-GATED** — Returns `404` outside `demo`/`test`/`development`/`funder_demo` AND requires `prescriber`/`facility_admin` scoped to `FAC-KGL-001`. |
@@ -128,3 +128,19 @@ AMRGuard exposes **38 FastAPI application routes** plus **3 FastAPI OpenAPI/docs
 |---:|---|---|---|---|---|---|---|---|---|
 | 36 | `POST` | `/api/v1/demo/prescriptions` | `main.py:create_demo_prescription` | Create synthetic demo prescription | Synthetic only | `ENFORCED + ENV-GATED` (`404` in `sandbox`/`production`) | `HUMAN` | `prescriber`, `facility_admin` | Must hold scope on synthetic demo facility `FAC-KGL-001` |
 | 37 | `POST` | `/api/v1/demo/risk-scenario` | `main.py:demo_risk_scenario` | Create deliberately blocked synthetic prescription | Synthetic only | `ENFORCED + ENV-GATED` (`404` in `sandbox`/`production`) | `HUMAN` | `prescriber`, `facility_admin` | Must hold scope on synthetic demo facility `FAC-KGL-001` |
+
+---
+
+### 3.8 Patient Consent, Dose-Level Reminders & SMS Integration Routes
+
+| # | Method | Route | Handler | Purpose | Sensitive Data | Enforcement Status | Auth Requirement | Required Role(s) / Scope(s) | Facility/Pharmacy Scope |
+|---:|---|---|---|---|---|---|---|---|---|
+| 38 | `POST` | `/api/v1/consent` | `main.py:record_patient_consent` | Record informed patient consent | `PHI-REF`, `CONSENT` | `ENFORCED` (audited, phone hashed) | `HUMAN` | `prescriber`, `pharmacist`, `stewardship_officer`, `facility_admin` | Scoped to caller's authorized `facility_id` |
+| 39 | `GET` | `/api/v1/consent` | `main.py:list_patient_consent` | List or query patient consent records | `PHI-REF`, `CONSENT` (Read) | `ENFORCED` | `HUMAN` | `prescriber`, `pharmacist`, `stewardship_officer`, `facility_admin`, `platform_operator` | Filtered strictly to caller's authorized `facility_id`(s) |
+| 40 | `POST` | `/api/v1/consent/{consent_id}/withdraw` | `main.py:withdraw_patient_consent` | Withdraw consent & cascade cancellation | `PHI-REF`, `CONSENT` | `ENFORCED` (audited) | `HUMAN` | `prescriber`, `pharmacist`, `stewardship_officer`, `facility_admin` | Scoped to record's `facility_id` |
+| 41 | `POST` | `/api/v1/prescriptions/{prescription_id}/reminders/schedule` | `main.py:schedule_dose_reminders` | Schedule dose occurrences & outbox queue | `PHI-REF`, `CLINICAL-WRITE` | `ENFORCED` (audited, rejects PRN) | `HUMAN` | `prescriber`, `pharmacist`, `stewardship_officer` | `rx.facility_id` MUST match caller's authorized facility scope |
+| 42 | `GET` | `/api/v1/prescriptions/{prescription_id}/reminders` | `main.py:get_prescription_reminder_schedules` | List dose reminder schedules & occurrences | `PHI-REF` (Read) | `ENFORCED` | `HUMAN` | `prescriber`, `pharmacist`, `stewardship_officer`, `facility_admin` | `rx.facility_id` MUST match caller's authorized facility scope |
+| 43 | `POST` | `/api/v1/reminders/dispatch-tick` | `main.py:trigger_reminder_dispatch_tick` | Lease & dispatch reminder outbox batch | `OPERATIONAL`, `OUTBOX` | `ENFORCED` (pre-send consent verified) | `SERVICE_CLIENT` | `integrations:sms:dispatch` | Worker service client scope |
+| 44 | `POST` | `/api/v1/integrations/sms/delivery-callback` | `main.py:receive_sms_delivery_callback` | SMS delivery webhook receipt | `OPERATIONAL`, `NETWORK-EVENT` | `ENFORCED` (audited, non-adherence) | `SERVICE_CLIENT` | `integrations:sms:callback` | SMS Gateway partner service client scope |
+| 45 | `POST` | `/api/v1/integrations/sms/inbound` | `main.py:receive_inbound_sms` | Inbound SMS opt-out webhook (STOP/YEKA) | `PHI-REF`, `CONSENT` | `ENFORCED` (audited, phone hashed) | `SERVICE_CLIENT` | `integrations:sms:inbound` | SMS Gateway partner service client scope |
+

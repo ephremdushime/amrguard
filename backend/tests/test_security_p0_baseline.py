@@ -275,7 +275,7 @@ def test_expired_stock_batch_is_rejected_for_dispensing():
             pharmacy_id=pharmacy['id'],
             antibiotic_id=ab.id,
             batch_number=f'EXP-BATCH-{uuid4().hex[:6]}',
-            expiry_date=date.today() - timedelta(days=1),
+            expiry_date=datetime.now(timezone.utc).date() - timedelta(days=1),
             quantity_available=50,
             source_reference='SYNTHETIC EXPIRED TEST',
         )

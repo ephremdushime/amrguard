@@ -147,3 +147,96 @@ class RmsStockEventRequest(BaseModel):
     expiry_date: date
     event_type: Literal['RECEIPT', 'ADJUSTMENT']
     quantity_delta: int = Field()
+
+
+# P1-06 / P1-07 Consent and Dose-Level Reminder Schemas
+
+class ConsentCreateRequest(BaseModel):
+    patient_reference: str = Field(min_length=1, max_length=150)
+    phone_number: str = Field(min_length=7, max_length=30)
+    purpose: Literal['DOSE_REMINDER', 'STEWARDSHIP_FOLLOWUP', 'ALL'] = 'DOSE_REMINDER'
+    channel: Literal['SMS'] = 'SMS'
+    language: Literal['rw', 'en', 'fr'] = 'rw'
+    facility_id: int | None = None
+    source_reference: str | None = Field(default=None, max_length=150)
+    evidence_reference: str | None = Field(default=None, max_length=255)
+    policy_version: str = Field(default='v1.0', max_length=50)
+
+
+class ConsentResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    patient_reference: str
+    purpose: str
+    channel: str
+    language: str
+    recipient_phone_masked: str
+    status: str
+    captured_at: datetime
+    facility_id: int | None = None
+    source_reference: str | None = None
+    evidence_reference: str | None = None
+    policy_version: str
+    withdrawn_at: datetime | None = None
+    withdrawal_reason: str | None = None
+
+
+class ConsentWithdrawRequest(BaseModel):
+    reason: str = Field(default='PATIENT_REQUEST', min_length=3, max_length=255)
+
+
+class ReminderScheduleCreateRequest(BaseModel):
+    prescription_item_id: int | None = None
+    daily_times: list[str] | None = None  # e.g. ["08:00", "20:00"]
+    start_date: datetime | None = None
+    language: Literal['rw', 'en', 'fr'] | None = None
+
+
+class ReminderOccurrenceResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    scheduled_at: datetime
+    dose_number: int
+    total_doses: int
+    instructions: str | None = None
+    status: str
+    suppression_reason: str | None = None
+    dispatched_at: datetime | None = None
+
+
+class ReminderScheduleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    prescription_id: int
+    prescription_item_id: int | None = None
+    patient_reference: str
+    consent_record_id: int
+    timezone: str
+    start_date: datetime
+    end_date: datetime
+    daily_times: list[str]
+    language: str
+    status: str
+    created_at: datetime
+    cancelled_at: datetime | None = None
+    cancellation_reason: str | None = None
+    total_doses: int = 0
+    occurrences: list[ReminderOccurrenceResponse] = []
+
+
+class DispatchBatchRequest(BaseModel):
+    batch_size: int = Field(default=50, ge=1, le=200)
+
+
+class DeliveryCallbackRequest(BaseModel):
+    provider: str = 'MOCK'
+    provider_message_id: str = Field(min_length=1, max_length=150)
+    event_type: Literal['DELIVERED', 'FAILED', 'REJECTED', 'UNDELIVERED'] = 'DELIVERED'
+    details: dict | None = None
+
+
+class InboundSmsRequest(BaseModel):
+    sender_phone: str = Field(min_length=7, max_length=30)
+    message_body: str = Field(min_length=1, max_length=500)
+    received_at: datetime | None = None
+

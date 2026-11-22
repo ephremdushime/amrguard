@@ -45,6 +45,9 @@ SCOPE_EBUZIMA_CRED_WRITE = 'integrations:ebuzima:credentials:write'
 SCOPE_RMS_STOCK_WRITE = 'integrations:rms:stock:write'
 SCOPE_DISPENSING_READ = 'integrations:dispensing:read'
 SCOPE_STEWARDSHIP_SUPPORT_READ = 'stewardship:support:read'
+SCOPE_SMS_DISPATCH = 'integrations:sms:dispatch'
+SCOPE_SMS_CALLBACK = 'integrations:sms:callback'
+SCOPE_SMS_INBOUND = 'integrations:sms:inbound'
 
 
 @dataclass(frozen=True)

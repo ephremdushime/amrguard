@@ -328,6 +328,7 @@ class Prescription(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     items: Mapped[list['PrescriptionItem']] = relationship(back_populates='prescription', cascade='all, delete-orphan')
+    reminder_schedules: Mapped[list['ReminderSchedule']] = relationship(back_populates='prescription', cascade='all, delete-orphan')
 
 
 class PrescriptionItem(Base):
@@ -349,6 +350,7 @@ class PrescriptionItem(Base):
     conversion_review_required: Mapped[bool] = mapped_column(Boolean, default=False)
     prescription: Mapped[Prescription] = relationship(back_populates='items')
     formulation: Mapped['Formulation | None'] = relationship()
+    reminder_schedules: Mapped[list['ReminderSchedule']] = relationship(back_populates='prescription_item')
 
 
 class PrescriptionCredential(Base):
@@ -521,3 +523,113 @@ class AuditEvent(Base):
     outcome: Mapped[str] = mapped_column(String(30), default='SUCCESS', index=True)
     details: Mapped[str] = mapped_column(Text, default='{}')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+
+class ConsentRecord(Base):
+    __tablename__ = 'consent_records'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    patient_reference: Mapped[str] = mapped_column(String(100), index=True)
+    purpose: Mapped[str] = mapped_column(String(50), index=True)  # DOSE_REMINDER, STEWARDSHIP_FOLLOWUP, ALL
+    channel: Mapped[str] = mapped_column(String(30), default='SMS')
+    language: Mapped[str] = mapped_column(String(10), default='rw')  # rw, en, fr
+    recipient_phone_hash: Mapped[str] = mapped_column(String(64), index=True)
+    recipient_phone_masked: Mapped[str] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(30), default='ACTIVE', index=True)  # ACTIVE, WITHDRAWN, EXPIRED
+    captured_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), index=True, nullable=True)
+    facility_id: Mapped[int | None] = mapped_column(ForeignKey('facilities.id'), index=True, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    source_reference: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    evidence_reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    policy_version: Mapped[str] = mapped_column(String(50), default='v1.0')
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    withdrawn_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), index=True, nullable=True)
+    withdrawal_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    schedules: Mapped[list['ReminderSchedule']] = relationship(back_populates='consent_record')
+    outbox_messages: Mapped[list['MessageOutbox']] = relationship(back_populates='consent_record')
+
+
+class ReminderSchedule(Base):
+    __tablename__ = 'reminder_schedules'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prescription_id: Mapped[int] = mapped_column(ForeignKey('prescriptions.id'), index=True)
+    prescription_item_id: Mapped[int | None] = mapped_column(ForeignKey('prescription_items.id'), index=True, nullable=True)
+    patient_reference: Mapped[str] = mapped_column(String(100), index=True)
+    consent_record_id: Mapped[int] = mapped_column(ForeignKey('consent_records.id'), index=True)
+    timezone: Mapped[str] = mapped_column(String(50), default='Africa/Kigali')
+    start_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    end_date: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    daily_times: Mapped[str] = mapped_column(Text)  # JSON encoded list of "HH:MM"
+    language: Mapped[str] = mapped_column(String(10), default='rw')
+    status: Mapped[str] = mapped_column(String(30), default='ACTIVE', index=True)  # ACTIVE, PAUSED, CANCELLED, COMPLETED
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancellation_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    prescription: Mapped[Prescription] = relationship(back_populates='reminder_schedules')
+    prescription_item: Mapped[PrescriptionItem | None] = relationship(back_populates='reminder_schedules')
+    consent_record: Mapped[ConsentRecord] = relationship(back_populates='schedules')
+    occurrences: Mapped[list['ReminderOccurrence']] = relationship(back_populates='schedule', cascade='all, delete-orphan')
+
+
+class ReminderOccurrence(Base):
+    __tablename__ = 'reminder_occurrences'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    schedule_id: Mapped[int] = mapped_column(ForeignKey('reminder_schedules.id'), index=True)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    dose_number: Mapped[int] = mapped_column(Integer)
+    total_doses: Mapped[int] = mapped_column(Integer)
+    instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default='PENDING', index=True)  # PENDING, QUEUED, SENT, CANCELLED, SUPPRESSED
+    suppression_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    schedule: Mapped[ReminderSchedule] = relationship(back_populates='occurrences')
+    outbox_messages: Mapped[list['MessageOutbox']] = relationship(back_populates='occurrence')
+
+
+class MessageOutbox(Base):
+    __tablename__ = 'message_outbox'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    occurrence_id: Mapped[int | None] = mapped_column(ForeignKey('reminder_occurrences.id'), index=True, nullable=True)
+    consent_record_id: Mapped[int] = mapped_column(ForeignKey('consent_records.id'), index=True)
+    destination_hash: Mapped[str] = mapped_column(String(64), index=True)
+    destination_masked: Mapped[str] = mapped_column(String(30))
+    message_text: Mapped[str] = mapped_column(Text)
+    channel: Mapped[str] = mapped_column(String(30), default='SMS')
+    status: Mapped[str] = mapped_column(String(30), default='PENDING', index=True)  # PENDING, LEASED, SENT, FAILED, DEAD_LETTER, CANCELLED
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3)
+    lease_token: Mapped[str | None] = mapped_column(String(100), index=True, nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc, index=True)
+    provider_message_id: Mapped[str | None] = mapped_column(String(150), index=True, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    occurrence: Mapped[ReminderOccurrence | None] = relationship(back_populates='outbox_messages')
+    consent_record: Mapped[ConsentRecord] = relationship(back_populates='outbox_messages')
+    delivery_events: Mapped[list['MessageDeliveryEvent']] = relationship(back_populates='outbox', cascade='all, delete-orphan')
+
+
+class MessageDeliveryEvent(Base):
+    # CLINICAL SAFETY INVARIANT:
+    # A message delivery event confirms network/provider transmission only.
+    # It DOES NOT prove patient ingestion or medication adherence.
+    __tablename__ = 'message_delivery_events'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    outbox_id: Mapped[int] = mapped_column(ForeignKey('message_outbox.id'), index=True)
+    provider: Mapped[str] = mapped_column(String(50), default='MOCK')
+    provider_message_id: Mapped[str] = mapped_column(String(150), index=True)
+    event_type: Mapped[str] = mapped_column(String(50), index=True)  # DELIVERED, FAILED, REJECTED, UNDELIVERED
+    raw_payload: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    outbox: Mapped[MessageOutbox] = relationship(back_populates='delivery_events')

@@ -32,6 +32,9 @@ from app.core.authz import (
     SCOPE_EBUZIMA_RX_READ,
     SCOPE_EBUZIMA_RX_WRITE,
     SCOPE_RMS_STOCK_WRITE,
+    SCOPE_SMS_CALLBACK,
+    SCOPE_SMS_DISPATCH,
+    SCOPE_SMS_INBOUND,
     SCOPE_STEWARDSHIP_SUPPORT_READ,
     audit_authz_denied,
     authorized_facility_ids_for_human,
@@ -54,6 +57,7 @@ from app.models.core import (
     Antibiotic,
     AntibioticRule,
     AuditEvent,
+    ConsentRecord,
     DispensingBatchLink,
     DispensingItem,
     DispensingTransaction,
@@ -63,11 +67,15 @@ from app.models.core import (
     IntegrationOutbox,
     MedicineConcept,
     MedicineMapping,
+    MessageDeliveryEvent,
+    MessageOutbox,
     Pharmacy,
     Prescriber,
     Prescription,
     PrescriptionCredential,
     PrescriptionItem,
+    ReminderOccurrence,
+    ReminderSchedule,
     StewardshipReminder,
     StewardshipReview,
     StockBatch,
@@ -76,12 +84,21 @@ from app.models.core import (
 from app.schemas.demo import DemoPrescriptionCreate
 from app.schemas.prescriptions import (
     BatchAllocation,
+    ConsentCreateRequest,
+    ConsentResponse,
+    ConsentWithdrawRequest,
     CredentialResponse,
+    DeliveryCallbackRequest,
+    DispatchBatchRequest,
     DispenseRequest,
+    InboundSmsRequest,
     MedicineMappingCreate,
     PrescriptionIn,
     PrescriptionResponse,
     QuarantineResolveRequest,
+    ReminderOccurrenceResponse,
+    ReminderScheduleCreateRequest,
+    ReminderScheduleResponse,
     RmsStockEventRequest,
     StewardshipReminderRequest,
     StewardshipReviewRequest,
@@ -90,7 +107,19 @@ from app.schemas.prescriptions import (
     VerificationRequest,
 )
 from app.services.audit import correlation_id_ctx, record_audit
+from app.services.consent import (
+    capture_consent,
+    handle_inbound_opt_out,
+    mask_phone_number,
+    verify_active_consent,
+    withdraw_consent,
+)
 from app.services.fhir import dispensing_to_medication_dispense, prescription_to_medication_request
+from app.services.reminders import (
+    create_dose_reminder_schedule,
+    dispatch_reminders_batch,
+    record_delivery_receipt,
+)
 from app.services.security import keyed_digest
 from app.services.validation import validate_item
 
@@ -1790,6 +1819,298 @@ def list_stewardship_reminders(
         }
         for reminder in rows
     ]
+
+
+# ============================================================================
+# P1-06: Informed Patient Consent Architecture
+# ============================================================================
+
+@app.post('/api/v1/consent', response_model=ConsentResponse)
+def record_patient_consent(
+    payload: ConsentCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN)),
+):
+    """Capture informed patient consent for dose reminders or stewardship notifications."""
+    facility_id = payload.facility_id
+    if facility_id is None:
+        allowed_facs = authorized_facility_ids_for_human(
+            principal, db, {ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN}
+        )
+        facility_id = next(iter(allowed_facs)) if allowed_facs else None
+    else:
+        if not has_platform_operator_scope(principal):
+            allowed_facs = authorized_facility_ids_for_human(
+                principal, db, {ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN}
+            )
+            if facility_id not in allowed_facs:
+                audit_authz_denied(
+                    db, principal, action='capture_consent', entity_type='ConsentRecord',
+                    entity_id=payload.patient_reference, facility_id=facility_id, reason='facility_not_authorized'
+                )
+                raise HTTPException(status_code=403, detail='Not authorized for this facility')
+
+    try:
+        consent = capture_consent(
+            db,
+            patient_reference=payload.patient_reference,
+            phone_number=payload.phone_number,
+            purpose=payload.purpose,
+            channel=payload.channel,
+            language=payload.language,
+            captured_by_user_id=principal.user_id,
+            facility_id=facility_id,
+            source_reference=payload.source_reference,
+            evidence_reference=payload.evidence_reference,
+            policy_version=payload.policy_version,
+        )
+        db.commit()
+        db.refresh(consent)
+        return consent
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get('/api/v1/consent', response_model=list[ConsentResponse])
+def list_patient_consent(
+    patient_reference: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN, ROLE_PLATFORM_OPERATOR)),
+):
+    """List or query consent records with facility tenancy scoping."""
+    query = select(ConsentRecord)
+    if patient_reference:
+        query = query.where(ConsentRecord.patient_reference == patient_reference.strip())
+    if status:
+        query = query.where(ConsentRecord.status == status.upper())
+
+    if not (has_platform_operator_scope(principal) or has_national_aggregate_scope(principal)):
+        allowed_facs = authorized_facility_ids_for_human(
+            principal, db, {ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN}
+        )
+        if not allowed_facs:
+            return []
+        query = query.where(ConsentRecord.facility_id.in_(allowed_facs) | ConsentRecord.facility_id.is_(None))
+
+    query = query.order_by(ConsentRecord.captured_at.desc()).limit(limit)
+    return db.scalars(query).all()
+
+
+@app.post('/api/v1/consent/{consent_id}/withdraw', response_model=ConsentResponse)
+def withdraw_patient_consent(
+    consent_id: int,
+    payload: ConsentWithdrawRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN)),
+):
+    """Withdraw consent and cascade cancellation to active schedules, occurrences, and outbox."""
+    consent = db.get(ConsentRecord, consent_id)
+    if not consent:
+        raise HTTPException(status_code=404, detail='Consent record not found')
+
+    if consent.facility_id and not has_platform_operator_scope(principal):
+        allowed_facs = authorized_facility_ids_for_human(
+            principal, db, {ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN}
+        )
+        if consent.facility_id not in allowed_facs:
+            audit_authz_denied(
+                db, principal, action='withdraw_consent', entity_type='ConsentRecord',
+                entity_id=consent_id, facility_id=consent.facility_id, reason='facility_not_authorized'
+            )
+            raise HTTPException(status_code=403, detail='Not authorized for this facility')
+
+    withdrawn = withdraw_consent(
+        db,
+        consent_id,
+        withdrawn_by_user_id=principal.user_id,
+        reason=payload.reason,
+    )
+    db.commit()
+    db.refresh(withdrawn)
+    return withdrawn
+
+
+# ============================================================================
+# P1-07: Dose-Level Reminder Engine & Outbox Dispatch
+# ============================================================================
+
+@app.post('/api/v1/prescriptions/{prescription_id}/reminders/schedule', response_model=ReminderScheduleResponse)
+def schedule_dose_reminders(
+    prescription_id: int,
+    payload: ReminderScheduleCreateRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER)),
+):
+    """Generate deterministic dose-level reminder schedules and queued outbox messages from an authoritative prescription."""
+    rx = db.get(Prescription, prescription_id)
+    if not rx:
+        raise HTTPException(status_code=404, detail='Prescription not found')
+
+    allowed_facs = authorized_facility_ids_for_human(
+        principal, db, {ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER}
+    )
+    if rx.facility_id not in allowed_facs:
+        audit_authz_denied(
+            db, principal, action='schedule_dose_reminders', entity_type='Prescription',
+            entity_id=rx.id, facility_id=rx.facility_id, reason='facility_not_authorized'
+        )
+        raise HTTPException(status_code=403, detail='Not authorized for this facility')
+
+    try:
+        schedule = create_dose_reminder_schedule(
+            db,
+            prescription_id=rx.id,
+            prescription_item_id=payload.prescription_item_id,
+            daily_times=payload.daily_times,
+            start_date=payload.start_date,
+            language=payload.language,
+            created_by_user_id=principal.user_id,
+        )
+        db.commit()
+        db.refresh(schedule)
+
+        occurrences = db.scalars(
+            select(ReminderOccurrence).where(ReminderOccurrence.schedule_id == schedule.id).order_by(ReminderOccurrence.dose_number.asc())
+        ).all()
+        return ReminderScheduleResponse(
+            id=schedule.id,
+            prescription_id=schedule.prescription_id,
+            prescription_item_id=schedule.prescription_item_id,
+            patient_reference=schedule.patient_reference,
+            consent_record_id=schedule.consent_record_id,
+            timezone=schedule.timezone,
+            start_date=schedule.start_date,
+            end_date=schedule.end_date,
+            daily_times=json.loads(schedule.daily_times),
+            language=schedule.language,
+            status=schedule.status,
+            created_at=schedule.created_at,
+            cancelled_at=schedule.cancelled_at,
+            cancellation_reason=schedule.cancellation_reason,
+            total_doses=len(occurrences),
+            occurrences=[ReminderOccurrenceResponse.model_validate(o) for o in occurrences],
+        )
+    except ValueError as e:
+        db.rollback()
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@app.get('/api/v1/prescriptions/{prescription_id}/reminders', response_model=list[ReminderScheduleResponse])
+def get_prescription_reminder_schedules(
+    prescription_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN)),
+):
+    """List dose-level reminder schedules and occurrences for a prescription."""
+    rx = db.get(Prescription, prescription_id)
+    if not rx:
+        raise HTTPException(status_code=404, detail='Prescription not found')
+
+    allowed_facs = authorized_facility_ids_for_human(
+        principal, db, {ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN}
+    )
+    if rx.facility_id not in allowed_facs:
+        audit_authz_denied(
+            db, principal, action='get_reminder_schedules', entity_type='Prescription',
+            entity_id=rx.id, facility_id=rx.facility_id, reason='facility_not_authorized'
+        )
+        raise HTTPException(status_code=403, detail='Not authorized for this facility')
+
+    schedules = db.scalars(
+        select(ReminderSchedule).where(ReminderSchedule.prescription_id == prescription_id).order_by(ReminderSchedule.created_at.desc())
+    ).all()
+
+    result = []
+    for s in schedules:
+        occurrences = db.scalars(
+            select(ReminderOccurrence).where(ReminderOccurrence.schedule_id == s.id).order_by(ReminderOccurrence.dose_number.asc())
+        ).all()
+        result.append(
+            ReminderScheduleResponse(
+                id=s.id,
+                prescription_id=s.prescription_id,
+                prescription_item_id=s.prescription_item_id,
+                patient_reference=s.patient_reference,
+                consent_record_id=s.consent_record_id,
+                timezone=s.timezone,
+                start_date=s.start_date,
+                end_date=s.end_date,
+                daily_times=json.loads(s.daily_times),
+                language=s.language,
+                status=s.status,
+                created_at=s.created_at,
+                cancelled_at=s.cancelled_at,
+                cancellation_reason=s.cancellation_reason,
+                total_doses=len(occurrences),
+                occurrences=[ReminderOccurrenceResponse.model_validate(o) for o in occurrences],
+            )
+        )
+    return result
+
+
+@app.post('/api/v1/reminders/dispatch-tick')
+def trigger_reminder_dispatch_tick(
+    payload: DispatchBatchRequest = DispatchBatchRequest(),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_service_scope(SCOPE_SMS_DISPATCH)),
+):
+    """Worker endpoint to lease and dispatch pending outbox messages with pre-send active consent checks."""
+    summary = dispatch_reminders_batch(db, batch_size=payload.batch_size)
+    db.commit()
+    return {
+        'status': 'SUCCESS',
+        'details': summary,
+    }
+
+
+@app.post('/api/v1/integrations/sms/delivery-callback')
+def receive_sms_delivery_callback(
+    payload: DeliveryCallbackRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_service_scope(SCOPE_SMS_CALLBACK)),
+):
+    """Record webhook delivery receipt from SMS gateway.
+
+    CLINICAL BOUNDARY: Network delivery receipt NEVER implies or records medication ingestion.
+    """
+    try:
+        event = record_delivery_receipt(
+            db,
+            provider=payload.provider,
+            provider_message_id=payload.provider_message_id,
+            event_type=payload.event_type,
+            raw_payload=payload.details,
+        )
+        db.commit()
+        return {
+            'status': 'ACKNOWLEDGED',
+            'event_id': event.id,
+            'event_type': event.event_type,
+            'clinical_notice': 'SMS delivery confirmation indicates network transmission only; does not record patient medication adherence.',
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.post('/api/v1/integrations/sms/inbound')
+def receive_inbound_sms(
+    payload: InboundSmsRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_service_scope(SCOPE_SMS_INBOUND)),
+):
+    """Inbound webhook for SMS keywords (STOP, YEKA, etc.) to trigger automatic consent withdrawal."""
+    try:
+        withdrawn = handle_inbound_opt_out(db, raw_phone=payload.sender_phone, message_body=payload.message_body)
+        db.commit()
+        return {
+            'status': 'PROCESSED',
+            'opt_out_actioned': len(withdrawn) > 0,
+            'consents_withdrawn': len(withdrawn),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 def create_due_stewardship_review(

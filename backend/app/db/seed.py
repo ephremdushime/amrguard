@@ -18,6 +18,9 @@ from app.core.authz import (
     SCOPE_EBUZIMA_RX_READ,
     SCOPE_EBUZIMA_RX_WRITE,
     SCOPE_RMS_STOCK_WRITE,
+    SCOPE_SMS_CALLBACK,
+    SCOPE_SMS_DISPATCH,
+    SCOPE_SMS_INBOUND,
     SCOPE_STEWARDSHIP_SUPPORT_READ,
 )
 from app.core.config import settings
@@ -46,6 +49,9 @@ DEMO_EBUZIMA_API_KEY = f'{DEMO_EBUZIMA_KEY_PREFIX}.{DEMO_EBUZIMA_KEY_SECRET}'
 DEMO_RMS_KEY_PREFIX = 'rms_demo_k1'
 DEMO_RMS_KEY_SECRET = 'synthetic-demo-rms-secret-not-for-prod-0001'
 DEMO_RMS_API_KEY = f'{DEMO_RMS_KEY_PREFIX}.{DEMO_RMS_KEY_SECRET}'
+DEMO_SMS_GATEWAY_KEY_PREFIX = 'sms_demo_k1'
+DEMO_SMS_GATEWAY_KEY_SECRET = 'synthetic-demo-sms-secret-not-for-prod-0001'
+DEMO_SMS_GATEWAY_API_KEY = f'{DEMO_SMS_GATEWAY_KEY_PREFIX}.{DEMO_SMS_GATEWAY_KEY_SECRET}'
 
 
 def seed_roles(db: Session) -> dict[str, Role]:
@@ -353,6 +359,19 @@ def seed_demo(db: Session):
         scopes=[
             (SCOPE_RMS_STOCK_WRITE, None, pharmacy.id),
             (SCOPE_DISPENSING_READ, None, pharmacy.id),
+        ],
+    )
+    ensure_service_client(
+        db,
+        client_code='sms-demo-gateway',
+        name='Synthetic SMS Gateway Adapter',
+        partner_type='INTEGRATION_GATEWAY',
+        key_prefix=DEMO_SMS_GATEWAY_KEY_PREFIX,
+        key_secret=DEMO_SMS_GATEWAY_KEY_SECRET,
+        scopes=[
+            (SCOPE_SMS_DISPATCH, None, None),
+            (SCOPE_SMS_CALLBACK, None, None),
+            (SCOPE_SMS_INBOUND, None, None),
         ],
     )
 
