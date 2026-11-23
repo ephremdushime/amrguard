@@ -387,3 +387,114 @@ def test_api_analytics_summary_includes_aware():
     assert data['aware_breakdown'] is not None
     assert 'access_percentage' in data['aware_breakdown']
     assert 'meets_who_access_target' in data['aware_breakdown']
+
+
+# =============================================================================
+# 6. P2-03 AI Assistance (Strictly Bounded) Tests
+# =============================================================================
+
+def test_api_ai_assist_prescription_validation_explainer(db_session: Session):
+    """Verifies bounded AI explainer for prescription validation with cited guidelines."""
+    prescriber_client, prescriber_headers = _login('demo.prescriber')
+
+    # Create synthetic prescription with Watch item
+    rx_resp = prescriber_client.post(
+        '/api/v1/demo/prescriptions',
+        json={
+            'external_id': f'EBZ-AI-TEST-{secrets.token_hex(4).upper()}',
+            'patient_reference': 'PATIENT-AI-001',
+            'antibiotic_code': 'CIP500TAB',
+            'dose': 500,
+            'frequency_per_day': 2,
+            'duration_days': 10,
+            'quantity': 20,
+            'indication': 'Complicated pyelonephritis',
+        },
+        headers=prescriber_headers,
+    )
+    assert rx_resp.status_code == 200
+    rx_id = rx_resp.json()['prescription']['id']
+
+    # Call AI assist explainer
+    ai_resp = prescriber_client.post(
+        '/api/v1/stewardship/ai-assist',
+        json={
+            'scenario': 'PRESCRIPTION_VALIDATION_EXPLAIN',
+            'prescription_id': rx_id,
+        },
+        headers=prescriber_headers,
+    )
+    assert ai_resp.status_code == 200
+    ai_data = ai_resp.json()
+
+    assert ai_data['scenario'] == 'PRESCRIPTION_VALIDATION_EXPLAIN'
+    assert ai_data['phi_redacted'] is True
+    assert 'PATIENT-AI-001' not in ai_data['summary']  # Direct ID must be masked
+    assert 'PATIENT-' in ai_data['summary']  # Tokenized replacement
+    assert len(ai_data['guideline_citations']) >= 2
+    assert any('WHO' in c['title'] for c in ai_data['guideline_citations'])
+    assert any('Rwanda' in c['title'] for c in ai_data['guideline_citations'])
+    assert len(ai_data['recommendations']) >= 1
+    assert any('Advisory synthesis only' in c for c in ai_data['uncertainty_caveats'])
+
+
+def test_api_ai_assist_alert_explainer_and_trend_summary(db_session: Session):
+    """Verifies AI alert explanation and aggregate trend summarization."""
+    steward_client, steward_headers = _login('demo.steward')
+
+    # 1. Fetch an open alert to explain
+    alerts_resp = steward_client.get('/api/v1/stewardship/alerts?limit=1', headers=steward_headers)
+    assert alerts_resp.status_code == 200
+    alerts = alerts_resp.json()
+    if alerts:
+        target_alert = alerts[0]
+        alert_ai = steward_client.post(
+            '/api/v1/stewardship/ai-assist',
+            json={
+                'scenario': 'STEWARDSHIP_ALERT_EXPLAIN',
+                'alert_id': target_alert['alert_id'],
+            },
+            headers=steward_headers,
+        )
+        assert alert_ai.status_code == 200
+        alert_ai_data = alert_ai.json()
+        assert alert_ai_data['scenario'] == 'STEWARDSHIP_ALERT_EXPLAIN'
+        assert alert_ai_data['phi_redacted'] is True
+        assert len(alert_ai_data['guideline_citations']) >= 1
+
+    # 2. Executive trend summary
+    trend_ai = steward_client.post(
+        '/api/v1/stewardship/ai-assist',
+        json={'scenario': 'AGGREGATE_TREND_SUMMARY'},
+        headers=steward_headers,
+    )
+    assert trend_ai.status_code == 200
+    trend_data = trend_ai.json()
+    assert trend_data['scenario'] == 'AGGREGATE_TREND_SUMMARY'
+    assert 'Access group consumption' in trend_data['summary']
+    assert len(trend_data['recommendations']) >= 1
+
+
+def test_api_ai_assist_security_and_tenant_scoping():
+    """Verifies that AI assist rejects anonymous requests and enforces tenant facility boundaries."""
+    client = TestClient(app)
+
+    # 1. Anonymous rejected
+    anon_resp = client.post(
+        '/api/v1/stewardship/ai-assist',
+        json={'scenario': 'AGGREGATE_TREND_SUMMARY'},
+    )
+    assert anon_resp.status_code == 401
+
+    # 2. Facility admin cannot request trend for an unauthorized facility
+    admin_client, admin_headers = _login('demo.admin')
+    cross_resp = admin_client.post(
+        '/api/v1/stewardship/ai-assist',
+        json={
+            'scenario': 'AGGREGATE_TREND_SUMMARY',
+            'facility_id': 999999,
+        },
+        headers=admin_headers,
+    )
+    assert cross_resp.status_code == 403
+

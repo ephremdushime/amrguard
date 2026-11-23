@@ -354,4 +354,24 @@ class AlertDispositionRequest(BaseModel):
     reason: str = Field(min_length=3, max_length=500)
 
 
+class AIAssistanceRequest(BaseModel):
+    scenario: Literal['PRESCRIPTION_VALIDATION_EXPLAIN', 'STEWARDSHIP_ALERT_EXPLAIN', 'AGGREGATE_TREND_SUMMARY']
+    prescription_id: int | None = None
+    alert_id: str | None = None
+    facility_id: int | None = None
+
+
+class AIAssistanceResponse(BaseModel):
+    scenario: str
+    summary: str
+    clinical_rationale: str
+    recommendations: list[str]
+    guideline_citations: list[dict[str, str]]
+    uncertainty_caveats: list[str]
+    phi_redacted: bool
+    model_version: str
+    evaluated_at: str
+
+
+
 

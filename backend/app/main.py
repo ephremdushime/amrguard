@@ -118,6 +118,8 @@ from app.schemas.prescriptions import (
     StewardshipAlertResponse,
     StewardshipRuleResponse,
     WhoAwareClassificationResponse,
+    AIAssistanceRequest,
+    AIAssistanceResponse,
 )
 from app.services.audit import correlation_id_ctx, record_audit
 from app.services.consent import (
@@ -154,6 +156,11 @@ from app.services.rules_engine import (
     get_active_rules,
     record_alert_disposition,
     seed_governed_rules,
+)
+from app.services.ai_assistance import (
+    explain_prescription_validation,
+    explain_stewardship_alert,
+    summarize_stewardship_trends,
 )
 from app.services.security import keyed_digest
 from app.services.validation import validate_item
@@ -2631,6 +2638,116 @@ def disposition_stewardship_alert(
     )
     db.commit()
     return updated_alert
+
+
+@app.post('/api/v1/stewardship/ai-assist', response_model=AIAssistanceResponse)
+def stewardship_ai_assist(
+    payload: AIAssistanceRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(
+        require_human_roles(
+            ROLE_STEWARDSHIP_OFFICER,
+            ROLE_PRESCRIBER,
+            ROLE_PHARMACIST,
+            ROLE_FACILITY_ADMIN,
+            ROLE_NATIONAL_ANALYST,
+        )
+    ),
+):
+    """Provides bounded, read-only clinical rationale explanations and guideline retrieval."""
+    if payload.scenario == 'PRESCRIPTION_VALIDATION_EXPLAIN':
+        if not payload.prescription_id:
+            raise HTTPException(400, 'prescription_id is required for PRESCRIPTION_VALIDATION_EXPLAIN')
+        rx = db.get(Prescription, payload.prescription_id)
+        if not rx:
+            raise HTTPException(404, 'Prescription not found')
+
+        if not has_national_aggregate_scope(principal):
+            allowed_facilities = authorized_facility_ids_for_human(
+                principal,
+                db,
+                {ROLE_STEWARDSHIP_OFFICER, ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_FACILITY_ADMIN},
+            )
+            if rx.facility_id not in allowed_facilities:
+                audit_authz_denied(
+                    db,
+                    principal,
+                    action='ai_assist_prescription_explain',
+                    entity_type='Prescription',
+                    entity_id=rx.id,
+                    facility_id=rx.facility_id,
+                    reason='unauthorized_facility_prescription',
+                )
+                raise HTTPException(403, 'Not authorized for this prescription facility')
+
+        res = explain_prescription_validation(db, rx)
+
+    elif payload.scenario == 'STEWARDSHIP_ALERT_EXPLAIN':
+        if not payload.alert_id:
+            raise HTTPException(400, 'alert_id is required for STEWARDSHIP_ALERT_EXPLAIN')
+        alert = db.scalar(select(StewardshipAlert).where(StewardshipAlert.alert_id == payload.alert_id))
+        if not alert:
+            raise HTTPException(404, 'Stewardship alert not found')
+
+        rx = db.get(Prescription, alert.prescription_id)
+        if rx and not has_national_aggregate_scope(principal):
+            allowed_facilities = authorized_facility_ids_for_human(
+                principal,
+                db,
+                {ROLE_STEWARDSHIP_OFFICER, ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_FACILITY_ADMIN},
+            )
+            if rx.facility_id not in allowed_facilities:
+                audit_authz_denied(
+                    db,
+                    principal,
+                    action='ai_assist_alert_explain',
+                    entity_type='StewardshipAlert',
+                    entity_id=alert.alert_id,
+                    facility_id=rx.facility_id,
+                    reason='unauthorized_facility_alert',
+                )
+                raise HTTPException(403, 'Not authorized for this alert facility')
+
+        res = explain_stewardship_alert(db, alert)
+
+    elif payload.scenario == 'AGGREGATE_TREND_SUMMARY':
+        target_facility_id = payload.facility_id
+        if not has_national_aggregate_scope(principal):
+            allowed_facilities = authorized_facility_ids_for_human(
+                principal,
+                db,
+                {ROLE_STEWARDSHIP_OFFICER, ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_FACILITY_ADMIN},
+            )
+            if target_facility_id is not None:
+                if target_facility_id not in allowed_facilities:
+                    audit_authz_denied(
+                        db,
+                        principal,
+                        action='ai_assist_trend_summary',
+                        entity_type='Facility',
+                        entity_id=target_facility_id,
+                        facility_id=target_facility_id,
+                        reason='unauthorized_facility_trend',
+                    )
+                    raise HTTPException(403, 'Not authorized for this facility')
+            elif len(allowed_facilities) == 1:
+                target_facility_id = next(iter(allowed_facilities))
+
+        res = summarize_stewardship_trends(db, facility_id=target_facility_id)
+    else:
+        raise HTTPException(400, f'Unsupported scenario {payload.scenario}')
+
+    audit(
+        db,
+        'AI_ASSISTANCE_REQUESTED',
+        'StewardshipIntelligence',
+        str(payload.prescription_id or payload.alert_id or payload.facility_id or 'GENERAL'),
+        principal.username or principal.actor_id,
+        {'scenario': payload.scenario, 'model_version': res['model_version']},
+        principal=principal,
+    )
+    db.commit()
+    return res
 
 
 @app.post('/api/v1/demo/prescriptions')

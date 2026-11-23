@@ -166,5 +166,7 @@ AMRGuard exposes **46 FastAPI application routes** plus **3 FastAPI OpenAPI/docs
 | 52 | `GET` | `/api/v1/stewardship/rules` | `main.py:list_stewardship_rules` | List clinically governed stewardship rules | Clinical protocol reference | `ENFORCED` (audited) | `HUMAN` or `SERVICE_CLIENT` | Any authenticated principal | Authenticated access |
 | 53 | `GET` | `/api/v1/stewardship/alerts` | `main.py:list_stewardship_alerts` | List generated stewardship alerts | `PHI-REF`, `CLINICAL-ALERT` (Read) | `ENFORCED` (audited) | `HUMAN` | `stewardship_officer`, `prescriber`, `pharmacist`, `facility_admin`, `national_analyst`, `platform_operator` | Filtered strictly to caller's authorized `facility_id`(s); global tenant list for `national_analyst` / `platform_operator` |
 | 54 | `POST` | `/api/v1/stewardship/alerts/{alert_id}/disposition` | `main.py:disposition_stewardship_alert` | Record alert review disposition & clinical rationale | `PHI-REF`, `CLINICAL-WRITE`, `AUDIT/SEC` | `ENFORCED` (records `disposition_user_id` + audited) | `HUMAN` | `stewardship_officer`, `prescriber`, `pharmacist`, `facility_admin` | Alert's prescription `facility_id` MUST be in caller's authorized facility scope |
+| 55 | `POST` | `/api/v1/stewardship/ai-assist` | `main.py:stewardship_ai_assist` | Bounded, cited AI clinical guidance & trend explainer | `CLINICAL-READONLY` | `ENFORCED` (PHI-redacted, cited, audited) | `HUMAN` | `prescriber`, `pharmacist`, `stewardship_officer`, `facility_admin`, `national_analyst` | Scoped to caller's authorized `facility_id` |
+
 
 

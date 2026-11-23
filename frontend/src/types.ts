@@ -187,3 +187,62 @@ export interface FacilityMeasure {
   reconciliation_rate: number;
   review_completion_rate: number;
 }
+
+export interface EvaluatedMetricItem {
+  metric_code: string;
+  name: string;
+  category: string;
+  value: number;
+  unit: string;
+  target_benchmark?: string | null;
+  benchmark_met: boolean;
+  numerator?: number | null;
+  denominator?: number | null;
+}
+
+export interface WhoAwareBreakdown {
+  total_orders: number;
+  total_units: number;
+  access_count: number;
+  watch_count: number;
+  reserve_count: number;
+  access_percentage: number;
+  watch_percentage: number;
+  reserve_percentage: number;
+  meets_who_access_target: boolean;
+  who_benchmark: string;
+  cell_suppression_applied: boolean;
+}
+
+export interface SuppressedCount {
+  value: number | null;
+  display: string;
+  suppressed: boolean;
+}
+
+export interface GovernedMetricsResponse {
+  facility_id?: number | null;
+  evaluated_at: string;
+  metrics: EvaluatedMetricItem[];
+  counts: Record<string, SuppressedCount | number>;
+  aware_breakdown: WhoAwareBreakdown;
+  data_quality_caveats: string[];
+}
+
+export interface StewardshipAlertItem {
+  id: number;
+  alert_id: string;
+  prescription_id: number;
+  prescription_item_id?: number | null;
+  rule_id?: number | null;
+  rule_code: string;
+  severity: string;
+  message: string;
+  clinical_evidence?: string | null;
+  status: string;
+  disposition_outcome?: string | null;
+  disposition_reason?: string | null;
+  disposition_at?: string | null;
+  created_at: string;
+}
+
