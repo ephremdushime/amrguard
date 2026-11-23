@@ -391,4 +391,13 @@ def seed_demo(db: Session):
         ],
     )
 
+    # Seed P2 Stewardship Intelligence, AWaRe, and Governed Rules
+    from app.services.aware import seed_who_aware_classifications
+    from app.services.metrics import seed_metric_definitions
+    from app.services.rules_engine import seed_governed_rules
+
+    seed_who_aware_classifications(db)
+    seed_metric_definitions(db)
+    seed_governed_rules(db)
+
     db.commit()

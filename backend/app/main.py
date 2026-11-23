@@ -81,6 +81,10 @@ from app.models.core import (
     StewardshipReview,
     StockBatch,
     StockEvent,
+    WhoAwareClassification,
+    MetricDefinition,
+    GovernedStewardshipRule,
+    StewardshipAlert,
 )
 from app.schemas.demo import DemoPrescriptionCreate
 from app.schemas.prescriptions import (
@@ -108,6 +112,12 @@ from app.schemas.prescriptions import (
     StewardshipSupportRequest,
     ValidationIssue,
     VerificationRequest,
+    AlertDispositionRequest,
+    GovernedMetricsResponse,
+    MetricDefinitionResponse,
+    StewardshipAlertResponse,
+    StewardshipRuleResponse,
+    WhoAwareClassificationResponse,
 )
 from app.services.audit import correlation_id_ctx, record_audit
 from app.services.consent import (
@@ -129,6 +139,21 @@ from app.adapters import (
     UnmappedCodeError,
     process_integration_outbox_batch,
     retry_dead_letter,
+)
+from app.services.aware import (
+    calculate_aware_breakdown,
+    classify_antibiotic,
+    seed_who_aware_classifications,
+)
+from app.services.metrics import (
+    evaluate_governed_metrics,
+    seed_metric_definitions,
+)
+from app.services.rules_engine import (
+    evaluate_prescription_rules,
+    get_active_rules,
+    record_alert_disposition,
+    seed_governed_rules,
 )
 from app.services.security import keyed_digest
 from app.services.validation import validate_item
@@ -388,7 +413,7 @@ def stewardship_support(
             }
         )
     antibiotic = db.scalar(select(Antibiotic).where(Antibiotic.code == payload.antibiotic_code))
-    category = 'UNCLASSIFIED'
+    category = classify_antibiotic(db, payload.antibiotic_code)
     if antibiotic:
         demo_rule = db.scalar(
             select(AntibioticRule).where(
@@ -654,6 +679,7 @@ def receive_prescription(
 
     blocks = [i for i in issues if i['severity'] == 'BLOCK']
     rx.status = 'BLOCKED' if blocks else ('WARNING' if issues else 'VALIDATED')
+    evaluate_prescription_rules(db, rx, auto_commit=False)
     audit(
         db,
         'PRESCRIPTION_RECEIVED',
@@ -2378,6 +2404,235 @@ def complete_stewardship_review(
     }
 
 
+@app.get('/api/v1/stewardship/metrics', response_model=GovernedMetricsResponse)
+def get_governed_metrics(
+    facility_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(
+        require_human_roles(
+            ROLE_STEWARDSHIP_OFFICER,
+            ROLE_NATIONAL_ANALYST,
+            ROLE_PLATFORM_OPERATOR,
+            ROLE_FACILITY_ADMIN,
+            ROLE_PRESCRIBER,
+            ROLE_PHARMACIST,
+        )
+    ),
+):
+    """Evaluates governed stewardship KPIs and WHO AWaRe breakdown with minimum-cell suppression."""
+    is_national = has_national_aggregate_scope(principal) or has_platform_operator_scope(principal)
+    if is_national:
+        target_facility_id = facility_id
+    else:
+        allowed_facilities = authorized_facility_ids_for_human(
+            principal,
+            db,
+            {ROLE_STEWARDSHIP_OFFICER, ROLE_FACILITY_ADMIN, ROLE_PRESCRIBER, ROLE_PHARMACIST},
+        )
+        if facility_id is not None:
+            if facility_id not in allowed_facilities:
+                audit_authz_denied(
+                    db,
+                    principal,
+                    action='read_governed_metrics',
+                    entity_type='Facility',
+                    entity_id=facility_id,
+                    facility_id=facility_id,
+                    reason='unauthorized_facility_metrics',
+                )
+                raise HTTPException(403, 'Not authorized to view metrics for this facility')
+            target_facility_id = facility_id
+        elif len(allowed_facilities) == 1:
+            target_facility_id = next(iter(allowed_facilities))
+        else:
+            target_facility_id = None
+
+    metrics_res = evaluate_governed_metrics(db, facility_id=target_facility_id)
+    audit(
+        db,
+        'GOVERNED_METRICS_EVALUATED',
+        'MetricDefinition',
+        str(target_facility_id or 'ALL'),
+        'AMRGuard',
+        {'target_facility_id': target_facility_id},
+        principal=principal,
+        facility_id=target_facility_id,
+    )
+    db.commit()
+    return metrics_res
+
+
+@app.get('/api/v1/stewardship/aware-catalog', response_model=list[WhoAwareClassificationResponse])
+def list_aware_catalog(
+    category: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_authenticated_principal),
+):
+    """Retrieves authoritative WHO AWaRe antibiotic classifications."""
+    seed_who_aware_classifications(db)
+    query = select(WhoAwareClassification)
+    if category:
+        query = query.where(WhoAwareClassification.category == category.upper())
+    query = query.order_by(WhoAwareClassification.generic_name)
+    rows = list(db.scalars(query).all())
+    audit(
+        db,
+        'AWARE_CATALOG_ACCESSED',
+        'WhoAwareClassification',
+        'LIST',
+        'AMRGuard',
+        {'category_filter': category, 'count': len(rows)},
+        principal=principal,
+    )
+    db.commit()
+    return rows
+
+
+@app.get('/api/v1/stewardship/rules', response_model=list[StewardshipRuleResponse])
+def list_stewardship_rules(
+    status: str | None = Query(default='ACTIVE'),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_authenticated_principal),
+):
+    """Retrieves clinically governed antimicrobial stewardship rules."""
+    seed_governed_rules(db)
+    query = select(GovernedStewardshipRule)
+    if status:
+        query = query.where(GovernedStewardshipRule.status == status.upper())
+    query = query.order_by(GovernedStewardshipRule.rule_code)
+    rows = list(db.scalars(query).all())
+    audit(
+        db,
+        'STEWARDSHIP_RULES_ACCESSED',
+        'GovernedStewardshipRule',
+        'LIST',
+        'AMRGuard',
+        {'status_filter': status, 'count': len(rows)},
+        principal=principal,
+    )
+    db.commit()
+    return rows
+
+
+@app.get('/api/v1/stewardship/alerts', response_model=list[StewardshipAlertResponse])
+def list_stewardship_alerts(
+    prescription_id: int | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(
+        require_human_roles(
+            ROLE_STEWARDSHIP_OFFICER,
+            ROLE_PRESCRIBER,
+            ROLE_PHARMACIST,
+            ROLE_FACILITY_ADMIN,
+            ROLE_NATIONAL_ANALYST,
+            ROLE_PLATFORM_OPERATOR,
+        )
+    ),
+):
+    """Retrieves generated stewardship alerts subject to tenant facility boundaries."""
+    query = select(StewardshipAlert).join(Prescription, StewardshipAlert.prescription_id == Prescription.id)
+
+    if not (has_national_aggregate_scope(principal) or has_platform_operator_scope(principal)):
+        allowed_facilities = authorized_facility_ids_for_human(
+            principal,
+            db,
+            {ROLE_STEWARDSHIP_OFFICER, ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_FACILITY_ADMIN},
+        )
+        if not allowed_facilities:
+            return []
+        query = query.where(Prescription.facility_id.in_(allowed_facilities))
+
+    if prescription_id:
+        query = query.where(StewardshipAlert.prescription_id == prescription_id)
+    if status:
+        query = query.where(StewardshipAlert.status == status.upper())
+
+    query = query.order_by(StewardshipAlert.created_at.desc()).limit(limit)
+    rows = list(db.scalars(query).all())
+
+    audit(
+        db,
+        'STEWARDSHIP_ALERTS_ACCESSED',
+        'StewardshipAlert',
+        str(prescription_id or 'LIST'),
+        'AMRGuard',
+        {'prescription_id': prescription_id, 'status': status, 'count': len(rows)},
+        principal=principal,
+    )
+    db.commit()
+    return rows
+
+
+@app.post('/api/v1/stewardship/alerts/{alert_id}/disposition', response_model=StewardshipAlertResponse)
+def disposition_stewardship_alert(
+    alert_id: str,
+    payload: AlertDispositionRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(
+        require_human_roles(
+            ROLE_STEWARDSHIP_OFFICER,
+            ROLE_PRESCRIBER,
+            ROLE_PHARMACIST,
+            ROLE_FACILITY_ADMIN,
+        )
+    ),
+):
+    """Records clinician or stewardship officer review disposition and clinical rationale for an alert."""
+    alert = db.scalar(select(StewardshipAlert).where(StewardshipAlert.alert_id == alert_id))
+    if not alert:
+        raise HTTPException(404, 'Stewardship alert not found')
+
+    rx = db.get(Prescription, alert.prescription_id)
+    if rx:
+        allowed_facilities = authorized_facility_ids_for_human(
+            principal,
+            db,
+            {ROLE_STEWARDSHIP_OFFICER, ROLE_PRESCRIBER, ROLE_PHARMACIST, ROLE_FACILITY_ADMIN},
+        )
+        if rx.facility_id not in allowed_facilities:
+            audit_authz_denied(
+                db,
+                principal,
+                action='disposition_stewardship_alert',
+                entity_type='StewardshipAlert',
+                entity_id=alert.alert_id,
+                facility_id=rx.facility_id,
+                reason='unauthorized_facility_alert',
+            )
+            raise HTTPException(403, 'Not authorized to disposition alerts for this prescription facility')
+
+    try:
+        updated_alert = record_alert_disposition(
+            db,
+            alert_id=alert_id,
+            outcome=payload.outcome,
+            reason=payload.reason,
+            user_id=principal.user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+    audit(
+        db,
+        'STEWARDSHIP_ALERT_DISPOSITIONED',
+        'StewardshipAlert',
+        updated_alert.alert_id,
+        principal.username or principal.actor_id,
+        {
+            'outcome': payload.outcome,
+            'reason': payload.reason,
+            'prescription_id': updated_alert.prescription_id,
+            'rule_code': updated_alert.rule_code,
+        },
+        principal=principal,
+        facility_id=rx.facility_id if rx else None,
+    )
+    db.commit()
+    return updated_alert
+
+
 @app.post('/api/v1/demo/prescriptions')
 def create_demo_prescription(
     payload: DemoPrescriptionCreate,
@@ -2432,6 +2687,7 @@ def create_demo_prescription(
     issues = validate_item(item, rule)
     blocks = [i for i in issues if i['severity'] == 'BLOCK']
     rx.status = 'BLOCKED' if blocks else ('WARNING' if issues else 'VALIDATED')
+    evaluate_prescription_rules(db, rx, auto_commit=False)
     audit(
         db,
         'DEMO_PRESCRIPTION_CREATED',
@@ -2497,6 +2753,7 @@ def demo_risk_scenario(
     )
     issues = validate_item(item, rule)
     rx.status = 'BLOCKED'
+    evaluate_prescription_rules(db, rx, auto_commit=False)
     audit(
         db,
         'DEMO_RISK_SCENARIO',
@@ -3351,6 +3608,7 @@ def analytics(
                 'stewardship_reviews_completed': 0,
                 'stewardship_review_completion_rate': 0.0,
                 'pending_stewardship_reviews': 0,
+                'aware_breakdown': None,
             }
         rx_subq = select(Prescription.id).where(Prescription.facility_id.in_(allowed_facilities)) if allowed_facilities else None
         prescriptions = (
@@ -3434,6 +3692,11 @@ def analytics(
             else 0
         )
 
+    aware_facility_id = None if has_national_aggregate_scope(principal) else (
+        next(iter(allowed_facilities)) if len(allowed_facilities) == 1 else None
+    )
+    aware_summary = calculate_aware_breakdown(db, facility_id=aware_facility_id)
+
     return {
         'prescriptions': prescriptions,
         'validated': validated,
@@ -3448,6 +3711,7 @@ def analytics(
         'stewardship_reviews_completed': completed_reviews,
         'stewardship_review_completion_rate': round(completed_reviews / max(total_reviews, 1) * 100, 1),
         'pending_stewardship_reviews': total_reviews - completed_reviews,
+        'aware_breakdown': aware_summary,
     }
 
 

@@ -155,3 +155,16 @@ AMRGuard exposes **46 FastAPI application routes** plus **3 FastAPI OpenAPI/docs
 | 48 | `GET` | `/api/v1/integrations/outbox/dead-letter` | `main.py:list_outbox_dead_letters` | List dead-letter reconciliation messages | `OPERATIONAL`, `OUTBOX` (Read) | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Technical operational inspection |
 | 49 | `POST` | `/api/v1/integrations/outbox/{outbox_id}/retry` | `main.py:retry_outbox_dead_letter` | Manually reset dead-letter outbox message | `OPERATIONAL`, `OUTBOX` | `ENFORCED` (audited) | `HUMAN` | `platform_operator` | Technical operational remediation |
 
+---
+
+### 3.10 Antimicrobial Stewardship Intelligence, AWaRe & Governed Rules
+
+| # | Method | Route | Handler | Purpose | Sensitive Data | Enforcement Status | Auth Requirement | Required Role(s) / Scope(s) | Facility/Pharmacy Scope |
+|---:|---|---|---|---|---|---|---|---|---|
+| 50 | `GET` | `/api/v1/stewardship/metrics` | `main.py:get_governed_metrics` | Evaluate governed KPIs, surveillance metrics & AWaRe breakdown | `METRIC-AGGREGATE` (Read) | `ENFORCED` (minimum-cell suppression & audited) | `HUMAN` | `stewardship_officer`, `national_analyst`, `platform_operator`, `facility_admin`, `prescriber`, `pharmacist` | Scoped to caller's authorized `facility_id`; global aggregate allowed for `national_analyst` / `platform_operator` |
+| 51 | `GET` | `/api/v1/stewardship/aware-catalog` | `main.py:list_aware_catalog` | List WHO AWaRe antibiotic classifications | Standard formulary reference | `ENFORCED` (audited) | `HUMAN` or `SERVICE_CLIENT` | Any authenticated principal | Authenticated access |
+| 52 | `GET` | `/api/v1/stewardship/rules` | `main.py:list_stewardship_rules` | List clinically governed stewardship rules | Clinical protocol reference | `ENFORCED` (audited) | `HUMAN` or `SERVICE_CLIENT` | Any authenticated principal | Authenticated access |
+| 53 | `GET` | `/api/v1/stewardship/alerts` | `main.py:list_stewardship_alerts` | List generated stewardship alerts | `PHI-REF`, `CLINICAL-ALERT` (Read) | `ENFORCED` (audited) | `HUMAN` | `stewardship_officer`, `prescriber`, `pharmacist`, `facility_admin`, `national_analyst`, `platform_operator` | Filtered strictly to caller's authorized `facility_id`(s); global tenant list for `national_analyst` / `platform_operator` |
+| 54 | `POST` | `/api/v1/stewardship/alerts/{alert_id}/disposition` | `main.py:disposition_stewardship_alert` | Record alert review disposition & clinical rationale | `PHI-REF`, `CLINICAL-WRITE`, `AUDIT/SEC` | `ENFORCED` (records `disposition_user_id` + audited) | `HUMAN` | `stewardship_officer`, `prescriber`, `pharmacist`, `facility_admin` | Alert's prescription `facility_id` MUST be in caller's authorized facility scope |
+
+

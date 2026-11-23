@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
 
 
@@ -265,5 +265,93 @@ class OutboxItemResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# =============================================================================
+# P2 — Stewardship Intelligence, Metrics & Governed Rules Schemas
+# =============================================================================
+
+
+class WhoAwareClassificationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    antibiotic_code: str
+    generic_name: str
+    category: str
+    atc_code: str | None = None
+    version: str
+    effective_date: date
+    clinical_notes: str | None = None
+
+
+class MetricDefinitionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    metric_code: str
+    name: str
+    category: str
+    description: str
+    calculation_formula: str
+    target_benchmark: str | None = None
+    minimum_cell_threshold: int = 5
+    version: str
+
+
+class EvaluatedMetricItem(BaseModel):
+    metric_code: str
+    name: str
+    category: str
+    value: float | int | None
+    unit: str
+    target_benchmark: str | None = None
+    benchmark_met: bool
+    numerator: float | int | None = None
+    denominator: float | int | None = None
+
+
+class GovernedMetricsResponse(BaseModel):
+    facility_id: int | None = None
+    evaluated_at: str
+    metrics: list[EvaluatedMetricItem]
+    counts: dict[str, Any]
+    aware_breakdown: dict[str, Any]
+    data_quality_caveats: list[str]
+
+
+class StewardshipRuleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    rule_code: str
+    title: str
+    description: str
+    category: str
+    severity: str
+    aware_category: str | None = None
+    max_duration_days: int | None = None
+    requires_specialist_approval: bool = False
+    version: int
+    status: str
+    clinical_rationale: str
+
+
+class StewardshipAlertResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    alert_id: str
+    prescription_id: int
+    prescription_item_id: int | None = None
+    rule_code: str
+    severity: str
+    message: str
+    clinical_evidence: str | None = None
+    status: str
+    disposition_outcome: str | None = None
+    disposition_reason: str | None = None
+    created_at: datetime
+
+
+class AlertDispositionRequest(BaseModel):
+    outcome: Literal['ACCEPTED', 'MODIFIED', 'OVERRIDDEN_WITH_REASON', 'FALSE_POSITIVE_FLAGGED']
+    reason: str = Field(min_length=3, max_length=500)
+
 
 
