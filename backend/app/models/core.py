@@ -730,3 +730,44 @@ class StewardshipAlert(Base):
     rule: Mapped[GovernedStewardshipRule] = relationship()
     disposition_user: Mapped[User | None] = relationship()
 
+
+class OfflineDispenseRecord(Base):
+    """Encrypted, signed offline dispensing transaction recorded during network outage."""
+
+    __tablename__ = 'offline_dispense_records'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bundle_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    pharmacy_id: Mapped[int] = mapped_column(ForeignKey('pharmacies.id'), index=True)
+    device_fingerprint: Mapped[str] = mapped_column(String(100))
+    signature: Mapped[str] = mapped_column(String(128))
+    offline_transaction_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    prescription_id: Mapped[int | None] = mapped_column(ForeignKey('prescriptions.id'), nullable=True, index=True)
+    prescription_code: Mapped[str] = mapped_column(String(50))
+    payload: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), default='PENDING', index=True)  # PENDING, RECONCILED, CONFLICT, REJECTED
+    conflict_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reconciled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reconciled_by_user_id: Mapped[int | None] = mapped_column(ForeignKey('users.id'), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+    pharmacy: Mapped[Pharmacy] = relationship()
+    prescription: Mapped[Prescription | None] = relationship()
+    reconciled_by: Mapped[User | None] = relationship()
+
+
+class EMRConnectorConfig(Base):
+    """Configuration metadata for registered institutional and national EMR connectors."""
+
+    __tablename__ = 'emr_connector_configs'
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    connector_code: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(150))
+    emr_system_type: Mapped[str] = mapped_column(String(50))  # EBUZIMA, OPENMRS, DHIS2, FHIR_R4
+    endpoint_url: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    auth_type: Mapped[str] = mapped_column(String(50), default='HMAC_SHA256')
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now_utc)
+
+

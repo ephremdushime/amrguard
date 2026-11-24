@@ -21,6 +21,7 @@ htmlcov/
 *.sqlite
 *.sqlite3
 *.log
+backups/
 temp_demo_check.py
 feature_verify.py
 amrguard-feature-verify.db

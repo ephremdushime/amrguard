@@ -8,13 +8,13 @@
 
 ## 1. Executive Summary
 
-AMRGuard exposes **46 FastAPI application routes** plus **3 FastAPI OpenAPI/docs routes** (49 total HTTP endpoints; OpenAPI/docs disabled by default in `production` and blocked in `frontend/nginx.conf`):
+AMRGuard exposes **59 FastAPI application routes** plus **3 FastAPI OpenAPI/docs routes** (62 total HTTP endpoints; OpenAPI/docs disabled by default in `production` and blocked in `frontend/nginx.conf`):
 
 | Endpoint Protection Class | Route Count | Implemented Enforcement Status |
 |---|---:|---|
-| Authenticated human-only operational routes (`OIDC/JWT` or controlled `local_session` + CSRF) | **30** | **ENFORCED** — Default-deny authentication, explicit RBAC roles, and service-layer facility/pharmacy/network tenancy checks. |
-| Dual-principal operational routes (strictly separated `HUMAN` roles OR scoped `SERVICE_CLIENT`) | **6** | **ENFORCED** — Combining credentials rejected (`400`); human roles and service scopes checked independently against target facility/pharmacy. |
-| Partner / integration service-client routes (`SERVICE_CLIENT` only via `<key_prefix>.<secret>`) | **5** | **ENFORCED** — Per-partner credentials with keyed HMAC-SHA256 digest, expiry, revocation, rotation, explicit scope, and provisioned facility/pharmacy allowlist. |
+| Authenticated human-only operational routes (`OIDC/JWT` or controlled `local_session` + CSRF) | **41** | **ENFORCED** — Default-deny authentication, explicit RBAC roles, and service-layer facility/pharmacy/network tenancy checks. |
+| Dual-principal operational routes (strictly separated `HUMAN` roles OR scoped `SERVICE_CLIENT`) | **8** | **ENFORCED** — Combining credentials rejected (`400`); human roles and service scopes checked independently against target facility/pharmacy. |
+| Partner / integration service-client routes (`SERVICE_CLIENT` only via `<key_prefix>.<secret>`) | **6** | **ENFORCED** — Per-partner credentials with keyed HMAC-SHA256 digest, expiry, revocation, rotation, explicit scope, and provisioned facility/pharmacy allowlist. |
 | Authentication lifecycle routes (`/api/v1/auth/login`, `/logout`, `/sessions/revoke-all`, `/me`) | **4** | **ENFORCED** — `/login` enforces Argon2id, rate limit, lockout, HttpOnly/Secure/SameSite=Strict cookie + CSRF cookie (disabled by default in `production`); `/logout`, `/sessions/revoke-all`, `/me` require authenticated human user (CSRF enforced on state changes). |
 | Public liveness / readiness probes (`/health`, `/health/ready`) | **2** | **PUBLIC (HARDENED)** — `/health` omits `environment` in `production`; `/health/ready` returns generic `503` without DB details on failure. |
 | Environment-gated demo routes (`/api/v1/demo/*`) | *(counted in human-only above)* | **ENFORCED + ENV-GATED** — Returns `404` outside `demo`/`test`/`development`/`funder_demo` AND requires `prescriber`/`facility_admin` scoped to `FAC-KGL-001`. |
@@ -167,6 +167,35 @@ AMRGuard exposes **46 FastAPI application routes** plus **3 FastAPI OpenAPI/docs
 | 53 | `GET` | `/api/v1/stewardship/alerts` | `main.py:list_stewardship_alerts` | List generated stewardship alerts | `PHI-REF`, `CLINICAL-ALERT` (Read) | `ENFORCED` (audited) | `HUMAN` | `stewardship_officer`, `prescriber`, `pharmacist`, `facility_admin`, `national_analyst`, `platform_operator` | Filtered strictly to caller's authorized `facility_id`(s); global tenant list for `national_analyst` / `platform_operator` |
 | 54 | `POST` | `/api/v1/stewardship/alerts/{alert_id}/disposition` | `main.py:disposition_stewardship_alert` | Record alert review disposition & clinical rationale | `PHI-REF`, `CLINICAL-WRITE`, `AUDIT/SEC` | `ENFORCED` (records `disposition_user_id` + audited) | `HUMAN` | `stewardship_officer`, `prescriber`, `pharmacist`, `facility_admin` | Alert's prescription `facility_id` MUST be in caller's authorized facility scope |
 | 55 | `POST` | `/api/v1/stewardship/ai-assist` | `main.py:stewardship_ai_assist` | Bounded, cited AI clinical guidance & trend explainer | `CLINICAL-READONLY` | `ENFORCED` (PHI-redacted, cited, audited) | `HUMAN` | `prescriber`, `pharmacist`, `stewardship_officer`, `facility_admin`, `national_analyst` | Scoped to caller's authorized `facility_id` |
+
+---
+
+### 3.11 Multi-Tenant EMR Connectors & National Surveillance Feeds
+
+| # | Method | Route | Handler | Purpose | Sensitive Data | Enforcement Status | Auth Requirement | Required Role(s) / Scope(s) | Facility/Pharmacy Scope |
+|---:|---|---|---|---|---|---|---|---|---|
+| 56 | `GET` | `/api/v1/integrations/connectors` | `main.py:list_connectors` | Discover registered EMR/eLMIS connectors | `OPERATIONAL` | `ENFORCED` | `HUMAN` or `SERVICE_CLIENT` | Human: `platform_operator`, `facility_admin`, `stewardship_officer`; Service: `integrations:connectors:read` | Scoped operational access |
+| 57 | `POST` | `/api/v1/integrations/openmrs/medication-request` | `main.py:receive_openmrs_medication_request` | Ingest OpenMRS FHIR / REST Order prescription payload | `PHI-REF`, `CLINICAL-WRITE` | `ENFORCED` (quarantine + audited) | `SERVICE_CLIENT` | `integrations:openmrs:prescriptions:write` | Scoped strictly to provisioned partner facility permissions |
+| 58 | `GET` | `/api/v1/national/surveillance/export` | `main.py:export_national_surveillance` | Multi-district privacy-preserved surveillance export (WHO GLASS / national feeds) | `METRIC-AGGREGATE` (Read) | `ENFORCED` (minimum-cell suppression & audited) | `HUMAN` | `national_analyst`, `platform_operator` | Multi-district national scope; cells < 5 suppressed |
+
+---
+
+### 3.12 Policy-Bound Offline Queue & Inventory Reconciliation
+
+| # | Method | Route | Handler | Purpose | Sensitive Data | Enforcement Status | Auth Requirement | Required Role(s) / Scope(s) | Facility/Pharmacy Scope |
+|---:|---|---|---|---|---|---|---|---|---|
+| 59 | `POST` | `/api/v1/dispensing/offline-queue` | `main.py:queue_offline_dispense` | Enqueue cryptographically signed offline dispensing transaction bundle | `PHI-REF`, `CLINICAL-WRITE`, `AUDIT/SEC` | `ENFORCED` (HMAC signature validated, replay prevented, audited) | `HUMAN` | `pharmacist` ONLY | Scoped to caller's authorized `pharmacy_id` |
+| 60 | `POST` | `/api/v1/dispensing/offline-reconcile` | `main.py:reconcile_offline_queue` | Reconcile queued offline records, decrement inventory atomically, detect conflicts | `PHI-REF`, `CLINICAL-WRITE`, `AUDIT/SEC` | `ENFORCED` (atomic reconciliation + outbox emission + audited) | `HUMAN` | `pharmacist`, `facility_admin` | Scoped to caller's authorized `pharmacy_id` |
+| 61 | `GET` | `/api/v1/dispensing/offline-queue` | `main.py:list_offline_queue` | List offline dispensing queue records and reconciliation status | `PHI-REF` (Read) | `ENFORCED` (audited) | `HUMAN` | `pharmacist`, `facility_admin`, `stewardship_officer` | Filtered strictly to caller's authorized `pharmacy_id`(s) |
+
+---
+
+### 3.13 Production Observability & Prometheus Metrics
+
+| # | Method | Route | Handler | Purpose | Sensitive Data | Enforcement Status | Auth Requirement | Required Role(s) / Scope(s) | Facility/Pharmacy Scope |
+|---:|---|---|---|---|---|---|---|---|---|
+| 62 | `GET` | `/api/v1/observability/metrics` | `main.py:observability_metrics` | Prometheus OpenMetrics plaintext scrape & structured JSON runtime telemetry | Operational metrics | `ENFORCED` (audited) | `HUMAN` | `platform_operator`, `national_analyst`, `facility_admin` | Scoped monitoring access |
+
 
 
 

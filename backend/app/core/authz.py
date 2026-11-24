@@ -40,6 +40,7 @@ ALL_CANONICAL_ROLES: dict[str, str] = {
 
 # Canonical service-client scopes
 SCOPE_EBUZIMA_RX_WRITE = 'integrations:ebuzima:prescriptions:write'
+SCOPE_OPENMRS_RX_WRITE = 'integrations:openmrs:prescriptions:write'
 SCOPE_EBUZIMA_RX_READ = 'integrations:ebuzima:prescriptions:read'
 SCOPE_EBUZIMA_CRED_WRITE = 'integrations:ebuzima:credentials:write'
 SCOPE_RMS_STOCK_WRITE = 'integrations:rms:stock:write'
@@ -108,21 +109,22 @@ def require_human_roles(*allowed_roles: str):
     return _dependency
 
 
-def require_service_scope(required_scope: str):
+def require_service_scope(*required_scopes: str):
     def _dependency(
         principal: Principal = Depends(require_service_client),
         db: Session = Depends(get_db),
     ) -> Principal:
-        if not any(g.scope == required_scope for g in principal.service_scopes):
+        allowed = set(required_scopes)
+        if not any(g.scope in allowed for g in principal.service_scopes):
             audit_authz_denied(
                 db,
                 principal,
                 action='service_scope_check',
                 entity_type='Endpoint',
-                entity_id=required_scope,
+                entity_id=','.join(required_scopes),
                 reason='missing_service_scope',
             )
-            raise HTTPException(status_code=403, detail=f'Service client lacks required scope: {required_scope}')
+            raise HTTPException(status_code=403, detail=f'Service client lacks required scope: {required_scopes}')
         return principal
 
     return _dependency

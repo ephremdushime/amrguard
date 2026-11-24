@@ -1,5 +1,5 @@
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import secrets
@@ -31,6 +31,7 @@ from app.core.authz import (
     SCOPE_EBUZIMA_CRED_WRITE,
     SCOPE_EBUZIMA_RX_READ,
     SCOPE_EBUZIMA_RX_WRITE,
+    SCOPE_OPENMRS_RX_WRITE,
     SCOPE_RMS_STOCK_WRITE,
     SCOPE_SMS_CALLBACK,
     SCOPE_SMS_DISPATCH,
@@ -85,6 +86,8 @@ from app.models.core import (
     MetricDefinition,
     GovernedStewardshipRule,
     StewardshipAlert,
+    OfflineDispenseRecord,
+    EMRConnectorConfig,
 )
 from app.schemas.demo import DemoPrescriptionCreate
 from app.schemas.prescriptions import (
@@ -120,6 +123,11 @@ from app.schemas.prescriptions import (
     WhoAwareClassificationResponse,
     AIAssistanceRequest,
     AIAssistanceResponse,
+    EMRConnectorResponse,
+    OfflineDispenseQueueRequest,
+    OfflineDispenseQueueResponse,
+    OfflineReconcileRequest,
+    OfflineReconcileResponse,
 )
 from app.services.audit import correlation_id_ctx, record_audit
 from app.services.consent import (
@@ -162,6 +170,10 @@ from app.services.ai_assistance import (
     explain_stewardship_alert,
     summarize_stewardship_trends,
 )
+from app.adapters.connectors import OpenMRSConnector, list_registered_connectors
+from app.services.national_surveillance import export_national_surveillance_feed
+from app.services.observability import gather_system_metrics, render_prometheus_metrics
+from app.services.offline_queue import enqueue_offline_bundle, reconcile_offline_bundle
 from app.services.security import keyed_digest
 from app.services.validation import validate_item
 
@@ -465,7 +477,11 @@ def receive_prescription(
     principal: Principal = Depends(require_service_scope(SCOPE_EBUZIMA_RX_WRITE)),
 ):
     fac = db.scalar(select(Facility).where(Facility.code == payload.prescriber.facility_code, Facility.active.is_(True)))
-    if not fac or not service_client_allows_facility(principal, SCOPE_EBUZIMA_RX_WRITE, fac.id):
+    allowed_facility = (
+        service_client_allows_facility(principal, SCOPE_EBUZIMA_RX_WRITE, fac.id)
+        or service_client_allows_facility(principal, SCOPE_OPENMRS_RX_WRITE, fac.id)
+    ) if fac else False
+    if not fac or not allowed_facility:
         if not fac and settings.effective_quarantine_unmapped_codes:
             inbox_entry = IntegrationInbox(
                 source_system=principal.service_client_code or 'e-Buzima',
@@ -747,6 +763,34 @@ def receive_ebuzima_fhir_bundle(
         raise HTTPException(status_code=422, detail=f'FHIR bundle parsing error: {exc}')
 
     return receive_prescription(rx_in, db, principal)
+
+
+@app.get('/api/v1/integrations/connectors', response_model=list[EMRConnectorResponse])
+def list_emr_connectors(
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_authenticated_principal),
+):
+    """Lists registered modular hospital and national EMR connectors."""
+    return list_registered_connectors()
+
+
+@app.post('/api/v1/integrations/openmrs/medication-request', response_model=PrescriptionResponse)
+def receive_openmrs_medication_request(
+    payload: dict,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_service_scope(SCOPE_OPENMRS_RX_WRITE, SCOPE_EBUZIMA_RX_WRITE)),
+):
+    """Ingests OpenMRS FHIR MedicationRequest or Order payload via modular OpenMRS connector."""
+    connector = OpenMRSConnector()
+    try:
+        rx_in, warnings = connector.parse_inbound_prescription(payload, db)
+    except UnmappedCodeError as exc:
+        raise HTTPException(status_code=422, detail=f'Unmapped OpenMRS code: {exc}')
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f'OpenMRS ingestion error: {exc}')
+
+    return receive_prescription(rx_in, db, principal)
+
 
 
 @app.get('/api/v1/prescriptions/{prescription_id}')
@@ -2750,6 +2794,40 @@ def stewardship_ai_assist(
     return res
 
 
+@app.get('/api/v1/national/surveillance/export')
+def export_national_surveillance(
+    district: str | None = Query(default=None),
+    period_start: date | None = Query(default=None),
+    period_end: date | None = Query(default=None),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(
+        require_human_roles(
+            ROLE_NATIONAL_ANALYST,
+            ROLE_PLATFORM_OPERATOR,
+        )
+    ),
+):
+    """Generates privacy-preserved national antimicrobial surveillance feed with minimum-cell suppression."""
+    res = export_national_surveillance_feed(
+        db,
+        district=district,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    audit(
+        db,
+        'NATIONAL_SURVEILLANCE_EXPORTED',
+        'NationalSurveillance',
+        district or 'ALL_DISTRICTS',
+        'AMRGuard',
+        {'district_filter': district, 'cell_suppression_applied': res['cell_suppression_applied']},
+        principal=principal,
+    )
+    db.commit()
+    return res
+
+
+
 @app.post('/api/v1/demo/prescriptions')
 def create_demo_prescription(
     payload: DemoPrescriptionCreate,
@@ -3503,6 +3581,114 @@ def batch_trace(
     }
 
 
+@app.post('/api/v1/dispensing/offline-queue', response_model=OfflineDispenseQueueResponse)
+def queue_offline_dispense_bundle(
+    request: OfflineDispenseQueueRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PHARMACIST, ROLE_PHARMACY_ASSISTANT)),
+):
+    """Enqueues cryptographically signed offline dispensing transactions recorded during facility network outage."""
+    allowed_pharmacies = authorized_pharmacy_ids_for_human(principal, db, {ROLE_PHARMACIST, ROLE_PHARMACY_ASSISTANT})
+    if request.pharmacy_id not in allowed_pharmacies:
+        audit_authz_denied(
+            db,
+            principal,
+            action='queue_offline_dispense',
+            entity_type='Pharmacy',
+            entity_id=request.pharmacy_id,
+            pharmacy_id=request.pharmacy_id,
+            reason='unauthorized_pharmacy_offline_queue',
+        )
+        raise HTTPException(403, 'Not authorized for this pharmacy')
+
+    try:
+        record = enqueue_offline_bundle(
+            db,
+            bundle_id=request.bundle_id,
+            pharmacy_id=request.pharmacy_id,
+            device_fingerprint=request.device_fingerprint,
+            signature=request.signature,
+            offline_transaction_id=request.offline_transaction_id,
+            prescription_code=request.prescription_code,
+            payload=request.payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+    return record
+
+
+@app.post('/api/v1/dispensing/offline-reconcile', response_model=OfflineReconcileResponse)
+def reconcile_offline_dispense_bundle(
+    request: OfflineReconcileRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_human_roles(ROLE_PHARMACIST, ROLE_FACILITY_ADMIN)),
+):
+    """Reconciles an offline dispense bundle with central ledger, stock decrement, and conflict detection."""
+    record = db.scalar(select(OfflineDispenseRecord).where(OfflineDispenseRecord.bundle_id == request.bundle_id))
+    if not record:
+        raise HTTPException(404, 'Offline bundle not found')
+
+    allowed_pharmacies = authorized_pharmacy_ids_for_human(principal, db, {ROLE_PHARMACIST, ROLE_FACILITY_ADMIN})
+    if record.pharmacy_id not in allowed_pharmacies:
+        audit_authz_denied(
+            db,
+            principal,
+            action='reconcile_offline_dispense',
+            entity_type='Pharmacy',
+            entity_id=record.pharmacy_id,
+            pharmacy_id=record.pharmacy_id,
+            reason='unauthorized_pharmacy_offline_reconcile',
+        )
+        raise HTTPException(403, 'Not authorized for this pharmacy')
+
+    try:
+        rec, tx = reconcile_offline_bundle(db, request.bundle_id, reconciled_by_user_id=principal.user_id)
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc))
+
+    return {
+        'bundle_id': rec.bundle_id,
+        'status': rec.status,
+        'conflict_reason': rec.conflict_reason,
+        'transaction_id': tx.transaction_id if tx else None,
+        'reconciled_at': rec.reconciled_at,
+    }
+
+
+@app.get('/api/v1/dispensing/offline-queue', response_model=list[OfflineDispenseQueueResponse])
+def list_offline_dispense_queue(
+    pharmacy_id: int | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(
+        require_human_roles(ROLE_PHARMACIST, ROLE_PHARMACY_ASSISTANT, ROLE_FACILITY_ADMIN, ROLE_PLATFORM_OPERATOR)
+    ),
+):
+    """Lists queued offline dispensing bundles subject to tenant pharmacy scope."""
+    query = select(OfflineDispenseRecord)
+    if not has_platform_operator_scope(principal):
+        allowed_pharmacies = authorized_pharmacy_ids_for_human(
+            principal, db, {ROLE_PHARMACIST, ROLE_PHARMACY_ASSISTANT, ROLE_FACILITY_ADMIN}
+        )
+        if pharmacy_id is not None:
+            if pharmacy_id not in allowed_pharmacies:
+                raise HTTPException(403, 'Not authorized for requested pharmacy')
+            query = query.where(OfflineDispenseRecord.pharmacy_id == pharmacy_id)
+        else:
+            query = query.where(OfflineDispenseRecord.pharmacy_id.in_(allowed_pharmacies))
+    elif pharmacy_id:
+        query = query.where(OfflineDispenseRecord.pharmacy_id == pharmacy_id)
+
+    if status:
+        query = query.where(OfflineDispenseRecord.status == status.upper())
+
+    query = query.order_by(OfflineDispenseRecord.created_at.desc()).limit(limit)
+    return list(db.scalars(query).all())
+
+
+
 @app.get('/api/v1/integrations/ebuzima/prescriptions/{prescription_id}/fhir')
 def prescription_fhir(
     prescription_id: int,
@@ -3673,6 +3859,25 @@ def audit_events(
         }
         for e in rows
     ]
+
+
+@app.get('/api/v1/observability/metrics')
+def observability_metrics(
+    format: str = Query(default='prometheus', pattern='^(prometheus|json)$'),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(
+        require_human_roles(
+            ROLE_PLATFORM_OPERATOR,
+            ROLE_NATIONAL_ANALYST,
+            ROLE_FACILITY_ADMIN,
+        )
+    ),
+):
+    """Exposes real-time Prometheus / OpenMetrics operational telemetry."""
+    if format == 'json':
+        return gather_system_metrics(db)
+    return Response(content=render_prometheus_metrics(db), media_type='text/plain')
+
 
 
 @app.get('/api/v1/analytics/summary')

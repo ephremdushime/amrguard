@@ -373,5 +373,45 @@ class AIAssistanceResponse(BaseModel):
     evaluated_at: str
 
 
+class OfflineDispenseQueueRequest(BaseModel):
+    bundle_id: str
+    pharmacy_id: int
+    device_fingerprint: str
+    signature: str
+    offline_transaction_id: str
+    prescription_code: str
+    payload: dict[str, Any]
+
+
+class OfflineDispenseQueueResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    bundle_id: str
+    pharmacy_id: int
+    offline_transaction_id: str
+    status: str
+    conflict_reason: str | None = None
+    created_at: datetime
+
+
+class OfflineReconcileRequest(BaseModel):
+    bundle_id: str
+
+
+class OfflineReconcileResponse(BaseModel):
+    bundle_id: str
+    status: str
+    conflict_reason: str | None = None
+    transaction_id: str | None = None
+    reconciled_at: datetime | None = None
+
+
+class EMRConnectorResponse(BaseModel):
+    connector_code: str
+    name: str
+    system_type: str
+
+
+
 
 
