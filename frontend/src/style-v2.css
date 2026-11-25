@@ -288,3 +288,165 @@ input,select,textarea{font-size:11px}input:focus,select:focus,textarea:focus{out
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+
+/* Institutional Role-Scoped Workspaces & Data Controls */
+.workspaceBadgeBox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 10px 12px;
+  border: 1px solid rgba(166, 223, 188, .18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .06);
+  color: #dff4ea;
+}
+.workspaceBadgeBox svg { flex: 0 0 auto; color: #87d3a8; }
+.workspaceBadgeBox small { display: block; font: 500 8px 'DM Mono', monospace; letter-spacing: .08em; color: #8ab2a4; text-transform: uppercase; }
+.workspaceBadgeBox strong { display: block; margin-top: 2px; font-size: 12px; color: #ffffff; }
+
+.workspaceSwitcher { margin-top: 4px; }
+.workspaceSwitcherList { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+.wsSwitchBtn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border: 1px solid rgba(200, 236, 218, .14);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .04);
+  color: #a9c6ba;
+  font-size: 9px;
+  font-weight: 600;
+}
+.wsSwitchBtn:hover { background: rgba(255, 255, 255, .1); color: #fff; }
+.wsSwitchBtn.active {
+  border-color: rgba(151, 218, 184, .35);
+  background: rgba(93, 170, 131, .28);
+  color: #ffffff;
+}
+
+.userContextBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid #d8e2dc;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #203932;
+  font-size: 11px;
+}
+.userContextBadge svg { color: var(--green); flex: 0 0 auto; }
+.roleTag {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #e7f3ed;
+  color: #126b5b;
+  font: 600 9px 'DM Mono', monospace;
+}
+.scopeTag {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #f1f5f3;
+  color: #536760;
+  font: 500 9px 'DM Mono', monospace;
+}
+
+.metricGrid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+.filterChips { display: flex; flex-wrap: wrap; gap: 5px; }
+.filterChips button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #fff;
+  color: #466058;
+  font: 600 10px 'DM Mono', monospace;
+}
+.filterChips button.primary {
+  border-color: var(--green);
+  background: var(--green);
+  color: #fff;
+}
+
+.dataTable { width: 100%; border-collapse: collapse; font-size: 11px; }
+.dataTable th {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  color: var(--muted);
+  font: 600 9px 'DM Mono', monospace;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.dataTable td {
+  padding: 9px 10px;
+  border-bottom: 1px solid #edf2ef;
+  color: var(--ink);
+  vertical-align: top;
+}
+.dataTable code { font: 500 10px 'DM Mono', monospace; color: #2f574b; }
+
+.awareBar {
+  display: flex;
+  height: 26px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #e5ece8;
+  border: 1px solid var(--line);
+}
+.awareBar > div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: width .35s ease;
+}
+
+.kpiTile {
+  padding: 12px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: #f8fbf9;
+}
+
+.codeBlock {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #102420;
+  color: #d7f2e5;
+  font: 400 11px/1.55 'DM Mono', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.dangerPill {
+  border-color: #ebc6bd !important;
+  background: #fbefec !important;
+  color: #a34d46 !important;
+}
+.aware-access { border-color: #b8dbc2; background: #eaf6ed; color: #166534; }
+.aware-watch { border-color: #f0dfc1; background: #fcf7ed; color: #9a5b13; }
+.aware-reserve { border-color: #ebc6bd; background: #fbefec; color: #991b1b; }
+
+.spin { animation: amrSpin 1s linear infinite; }
+@keyframes amrSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+@media (max-width: 1120px) {
+  .metricGrid.four { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .userContextBadge .scopeTag { display: none; }
+}
+@media (max-width: 760px) {
+  .workspaceBadgeBox { display: none; }
+  .userContextBadge { display: none; }
+  .dispensingLayout { grid-template-columns: 1fr !important; }
+}

@@ -199,3 +199,31 @@ AMRGuard exposes **59 FastAPI application routes** plus **3 FastAPI OpenAPI/docs
 
 
 
+
+---
+
+### 3.14 Institutional & Platform Administration Governance Routes
+
+| # | Method | Route | Handler | Purpose | Sensitive Data | Enforcement Status | Auth Requirement | Required Role(s) / Scope(s) | Facility/Pharmacy Scope |
+|---:|---|---|---|---|---|---|---|---|---|
+| 63 | `GET` | `/api/v1/admin/organizations` | `admin_routes.py:list_organizations` | List organizations | Institutional metadata | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Platform: all; Facility Admin: own parent organization(s) only |
+| 64 | `POST` | `/api/v1/admin/organizations` | `admin_routes.py:create_organization` | Create organization | Institutional write | `ENFORCED` (audited) | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |
+| 65 | `GET` | `/api/v1/admin/facilities` | `admin_routes.py:list_facilities` | List facilities | Institutional metadata | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Platform: all; Facility Admin: authorized `facility_id`(s) only |
+| 66 | `POST` | `/api/v1/admin/facilities` | `admin_routes.py:create_facility` | Create facility | Institutional write | `ENFORCED` (audited) | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |
+| 67 | `PATCH` | `/api/v1/admin/facilities/{facility_id}` | `admin_routes.py:update_facility` | Update facility metadata/status | Institutional write | `ENFORCED` (audited) | `HUMAN` | `platform_operator`, `facility_admin` | Platform: all; Facility Admin: own facility name/district only |
+| 68 | `GET` | `/api/v1/admin/pharmacies` | `admin_routes.py:list_admin_pharmacies` | List pharmacies for governance | Institutional metadata | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Platform: all; Facility Admin: own facility pharmacies only |
+| 69 | `POST` | `/api/v1/admin/pharmacies` | `admin_routes.py:create_pharmacy` | Register pharmacy | Institutional write | `ENFORCED` (audited) | `HUMAN` | `platform_operator`, `facility_admin` | Platform: any; Facility Admin: `FACILITY_PHARMACY` linked to own `facility_id` only |
+| 70 | `PATCH` | `/api/v1/admin/pharmacies/{pharmacy_id}` | `admin_routes.py:update_pharmacy` | Update pharmacy configuration | Institutional write | `ENFORCED` (audited) | `HUMAN` | `platform_operator`, `facility_admin` | Platform: any; Facility Admin: own facility pharmacies only |
+| 71 | `GET` | `/api/v1/admin/networks` | `admin_routes.py:list_pharmacy_networks` | List cross-facility dispensing networks | Governance metadata | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Platform: all; Facility Admin: networks linked to own facility |
+| 72 | `POST` | `/api/v1/admin/networks` | `admin_routes.py:create_pharmacy_network` | Create cross-facility dispensing network | Governance write | `ENFORCED` (audited) | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |
+| 73 | `POST` | `/api/v1/admin/networks/{network_id}/members` | `admin_routes.py:upsert_pharmacy_network_member` | Configure network facility/pharmacy/medicine permissions | Governance write | `ENFORCED` (audited) | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |
+| 74 | `GET` | `/api/v1/admin/roles` | `admin_routes.py:list_roles` | List canonical RBAC roles | Governance metadata | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Platform: all 7 roles; Facility Admin: facility-grantable clinical/ops roles only |
+| 75 | `GET` | `/api/v1/admin/users` | `admin_routes.py:list_users` | List human accounts and role scopes | Identity metadata (no password hashes) | `ENFORCED` | `HUMAN` | `platform_operator`, `facility_admin` | Platform: all; Facility Admin: strictly users scoped to own facility/pharmacies |
+| 76 | `POST` | `/api/v1/admin/users` | `admin_routes.py:create_user` | Provision local or OIDC human user + initial scope | `AUDIT/SEC` | `ENFORCED` (anti-escalation + audited) | `HUMAN` | `platform_operator`, `facility_admin` | Facility Admin restricted to own facility/pharmacy scopes and non-elevated roles |
+| 77 | `PATCH` | `/api/v1/admin/users/{user_id}` | `admin_routes.py:update_user` | Update user, unlock, or deactivate (revokes active sessions) | `AUDIT/SEC` | `ENFORCED` (anti-escalation + audited) | `HUMAN` | `platform_operator`, `facility_admin` | Facility Admin restricted to users within own facility scope; blocks self-deactivation |
+| 78 | `POST` | `/api/v1/admin/users/{user_id}/role-scopes` | `admin_routes.py:grant_user_role_scope` | Grant explicit role scope (`FACILITY`/`PHARMACY`/`ORG`/`NATIONAL`/`PLATFORM`) | `AUDIT/SEC` | `ENFORCED` (explicit DB constraint + audited) | `HUMAN` | `platform_operator`, `facility_admin` | Strictly enforces caller scope and blocks privilege escalation |
+| 79 | `POST` | `/api/v1/admin/users/{user_id}/role-scopes/{scope_id}/revoke` | `admin_routes.py:revoke_user_role_scope` | Soft-revoke an active role scope | `AUDIT/SEC` | `ENFORCED` (audited) | `HUMAN` | `platform_operator`, `facility_admin` | Strictly enforces caller scope; blocks self-revocation of admin role |
+| 80 | `GET` | `/api/v1/admin/service-clients` | `admin_routes.py:list_service_clients` | List partner service clients, scopes, and credential metadata | `AUDIT/SEC` (no secret hashes) | `ENFORCED` | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |
+| 81 | `POST` | `/api/v1/admin/service-clients` | `admin_routes.py:create_service_client` | Provision partner service client and issue initial HMAC-stored key once | `AUDIT/SEC` | `ENFORCED` (audited) | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |
+| 82 | `POST` | `/api/v1/admin/service-clients/{client_id}/rotate-key` | `admin_routes.py:rotate_service_client_key` | Rotate partner service-client key (immediate or overlap revocation) | `AUDIT/SEC` | `ENFORCED` (audited) | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |
+| 83 | `POST` | `/api/v1/admin/service-clients/{client_id}/credentials/{credential_id}/revoke` | `admin_routes.py:revoke_service_client_credential` | Immediately revoke a partner service-client credential | `AUDIT/SEC` | `ENFORCED` (audited) | `HUMAN` | `platform_operator` ONLY | Explicit `PLATFORM` scope |

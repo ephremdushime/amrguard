@@ -13,6 +13,7 @@ from sqlalchemy import func, inspect, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
 from app.core.auth import (
     Principal,
@@ -181,7 +182,19 @@ API_VERSION = 'v1'
 APP_VERSION = '0.7.0'
 
 TECHNICAL_AUDIT_ENTITY_TYPES = frozenset(
-    {'Authentication', 'ServiceClient', 'ServiceClientCredential', 'UserSession', 'Endpoint'}
+    {
+        'Authentication',
+        'ServiceClient',
+        'ServiceClientCredential',
+        'UserSession',
+        'Endpoint',
+        'Organization',
+        'Facility',
+        'Pharmacy',
+        'PharmacyNetwork',
+        'User',
+        'UserRoleScope',
+    }
 )
 
 
@@ -241,6 +254,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(admin_router)
 
 # Local demo databases are bootstrapped for convenience. Hosted modes are migrated by Alembic at container startup.
 if settings.app_env in {'demo', 'development', 'test', 'funder_demo'}:

@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from fastapi.routing import APIRoute
@@ -389,13 +390,8 @@ def test_every_non_public_route_enforces_authentication_dependency():
         for method in sorted(route.methods - {'HEAD', 'OPTIONS'}):
             if (method, route.path) in public_routes:
                 continue
-            path = (
-                route.path.replace('{prescription_id}', '1')
-                .replace('{pharmacy_id}', '1')
-                .replace('{batch_id}', '1')
-                .replace('{review_id}', '1')
-                .replace('{transaction_id}', 'DT-NONEXISTENT')
-            )
+            path = route.path.replace('{transaction_id}', 'DT-NONEXISTENT')
+            path = re.sub(r'\{[^}]+_id\}', '1', path)
             kwargs = {'json': {}} if method in {'POST', 'PUT', 'PATCH'} else {}
             if route.path == '/api/v1/verification/otp':
                 kwargs = {'params': {'otp': '000000'}}

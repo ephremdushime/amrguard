@@ -31,6 +31,7 @@ node_modules/
 frontend/dist/
 frontend/dist-*/
 frontend/.vite/
+frontend/.test-dist/
 coverage/
 npm-debug.log*
 /package-lock.json

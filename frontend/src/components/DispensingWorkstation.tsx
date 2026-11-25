@@ -36,6 +36,8 @@ interface DispensingWorkstationProps {
     refusalReason?: string;
   }) => Promise<void>;
   busy: boolean;
+  canDispense?: boolean;
+  canIssueCredential?: boolean;
 }
 
 export function DispensingWorkstation({
@@ -54,6 +56,8 @@ export function DispensingWorkstation({
   onIssueCredential,
   onDispense,
   busy,
+  canDispense = true,
+  canIssueCredential = true,
 }: DispensingWorkstationProps) {
   const [selectedItemId, setSelectedItemId] = useState<number>(0);
   const [useSplitBatches, setUseSplitBatches] = useState(false);
@@ -336,7 +340,7 @@ export function DispensingWorkstation({
           </div>
         )}
 
-        {isEligibleForDispense && !isVerified && !credential && !otp && (
+        {canIssueCredential && isEligibleForDispense && !isVerified && !credential && !otp && (
           <button
             type="button"
             className="secondary"
@@ -518,15 +522,18 @@ export function DispensingWorkstation({
         )}
 
         {/* Submit Button */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 4, gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontSize: '12px', color: 'var(--muted)' }}>
-            Authorizing staff: strictly recorded for batch audit and RMS reconciliation.
+            {canDispense
+              ? 'Authorizing pharmacist identity is strictly recorded for batch audit and RMS outbox reconciliation.'
+              : 'Pharmacy Assistant boundary: you can verify credentials and inspect stock, but only a licensed Pharmacist may commit dispensing.'}
           </div>
 
           <button
             type="submit"
             className="primary"
             disabled={
+              !canDispense ||
               busy ||
               !isVerified ||
               itemRemaining === 0 ||
@@ -535,11 +542,13 @@ export function DispensingWorkstation({
             style={{ padding: '8px 18px', fontSize: '14px' }}
           >
             <CheckCircle2 size={16} />
-            {busy
-              ? 'Authorizing Transaction…'
-              : outcome === 'REFUSED' || outcome === 'UNAVAILABLE'
-                ? 'Record Dispensing Exception'
-                : `Authorize Dispense (${calculatedTotalAllocated} units)`}
+            {!canDispense
+              ? 'Pharmacist Role Required to Dispense'
+              : busy
+                ? 'Authorizing Transaction…'
+                : outcome === 'REFUSED' || outcome === 'UNAVAILABLE'
+                  ? 'Record Dispensing Exception'
+                  : `Authorize Dispense (${calculatedTotalAllocated} units)`}
           </button>
         </div>
       </form>
